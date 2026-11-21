@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 /* Included in the frontend TU. The peer is captured at createPeerManager().
  * Method calls use exact exports. The narrowly pinned state reader below
  * is read-only and requires both the Bridge ABI guard and exact class size. */
@@ -114,12 +115,12 @@ public:
 #include "OwlyP2PInherited.inc"
     bool createPeerManager(ether_addr *mac,IO80211PeerManager **peer) override {
         bool ok=IO80211P2PInterface::createPeerManager(mac,peer);
-        auto *front=OSDynamicCast(AirPortRTW89Front,owly_vif_controller(this));
+        auto *front=OSDynamicCast(RTLAirLinkFront,owly_vif_controller(this));
         if(ok && peer && *peer && front)front->owlyNativeCapture(this,*peer);
         return ok;
     }
     UInt32 outputPacket(mbuf_t m,void *) override {
-        auto *front=OSDynamicCast(AirPortRTW89Front,owly_vif_controller(this));
+        auto *front=OSDynamicCast(RTLAirLinkFront,owly_vif_controller(this));
         if(front)return front->owlyNativeOutput(this,m);
         if(m)mbuf_freem(m);return kIOReturnOutputDropped;
     }
@@ -128,7 +129,7 @@ OSDefineMetaClassAndStructors(OwlyNativeP2PInterface,IO80211P2PInterface)
 static_assert(sizeof(OwlyNativeP2PInterface)==sizeof(IO80211P2PInterface),
               "Native subclass adds no fields to the opaque Apple layout");
 
-bool AirPortRTW89Front::owlyNativeStart()
+bool RTLAirLinkFront::owlyNativeStart()
 {
     _owlyNativeCall=thread_call_allocate(owlyNativeTick,this);
     if(!_owlyNativeCall)return false;
@@ -136,7 +137,7 @@ bool AirPortRTW89Front::owlyNativeStart()
     setProperty("OwlyNativePeerDataRevision",7ULL,32);
     return true;
 }
-void AirPortRTW89Front::owlyNativeSchedule(uint64_t us)
+void RTLAirLinkFront::owlyNativeSchedule(uint64_t us)
 {
     uint64_t interval;
     nanoseconds_to_absolutetime(us*1000u,&interval);
@@ -147,7 +148,7 @@ void AirPortRTW89Front::owlyNativeSchedule(uint64_t us)
     }
     IOLockUnlock(_owlyVifLock);
 }
-void AirPortRTW89Front::owlyNativeCapture(IO80211VirtualInterface *vif,IO80211PeerManager *raw)
+void RTLAirLinkFront::owlyNativeCapture(IO80211VirtualInterface *vif,IO80211PeerManager *raw)
 {
     OSObject *peer=reinterpret_cast<OSObject *>(raw),*oldPeer=nullptr;
     IO80211VirtualInterface *oldVif=nullptr;
@@ -166,7 +167,7 @@ void AirPortRTW89Front::owlyNativeCapture(IO80211VirtualInterface *vif,IO80211Pe
     OSSafeReleaseNULL(oldPeer);OSSafeReleaseNULL(oldVif);
     owlyNativeSchedule(1000);
 }
-bool AirPortRTW89Front::owlyNativeAcquire(IO80211VirtualInterface **vif,OSObject **peer)
+bool RTLAirLinkFront::owlyNativeAcquire(IO80211VirtualInterface **vif,OSObject **peer)
 {
     *vif=nullptr;*peer=nullptr;
     IOLockLock(_owlyVifLock);
@@ -181,7 +182,7 @@ bool AirPortRTW89Front::owlyNativeAcquire(IO80211VirtualInterface **vif,OSObject
     }
     IOLockUnlock(_owlyVifLock);return ok;
 }
-void AirPortRTW89Front::owlyNativeRelease(IO80211VirtualInterface *vif,OSObject *peer)
+void RTLAirLinkFront::owlyNativeRelease(IO80211VirtualInterface *vif,OSObject *peer)
 {
     IOLockLock(_owlyVifLock);
     _owlyVifMethodBusy=false;--_owlyNativeUsers;_owlyNativeOwnerThread=nullptr;
@@ -190,7 +191,7 @@ void AirPortRTW89Front::owlyNativeRelease(IO80211VirtualInterface *vif,OSObject 
     peer->release();vif->release();
     owlyFinishDeferredStop();release();
 }
-void AirPortRTW89Front::owlyNativeStop()
+void RTLAirLinkFront::owlyNativeStop()
 {
     if(!_owlyVifLock)return;
     IOLockLock(_owlyVifLock);_owlyNativeClosed=true;IOLockUnlock(_owlyVifLock);
@@ -210,9 +211,9 @@ void AirPortRTW89Front::owlyNativeStop()
     OSSafeReleaseNULL(peer);OSSafeReleaseNULL(vif);
     if(releasePending)release();
 }
-void AirPortRTW89Front::owlyNativeTick(thread_call_param_t context,thread_call_param_t)
+void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_param_t)
 {
-    auto *self=static_cast<AirPortRTW89Front *>(context);
+    auto *self=static_cast<RTLAirLinkFront *>(context);
     IOLockLock(self->_owlyVifLock);
     self->_owlyNativePending=false;self->_owlyNativeCallbackThread=current_thread();
     IOLockUnlock(self->_owlyVifLock);
@@ -431,7 +432,7 @@ void AirPortRTW89Front::owlyNativeTick(thread_call_param_t context,thread_call_p
     IOLockLock(self->_owlyVifLock);self->_owlyNativeCallbackThread=nullptr;IOLockUnlock(self->_owlyVifLock);
     self->release(); /* reference owned by this scheduled invocation */
 }
-bool AirPortRTW89Front::owlyNativeReceive(const struct owly_abi6_packet *pkt)
+bool RTLAirLinkFront::owlyNativeReceive(const struct owly_abi6_packet *pkt)
 {
     if(!pkt || !pkt->channel || !pkt->received_us ||
        (pkt->kind==OWLY_ABI6_PACKET_ACTION && pkt->rssi>=0) ||
@@ -458,7 +459,7 @@ bool AirPortRTW89Front::owlyNativeReceive(const struct owly_abi6_packet *pkt)
                           false,false,false,false,false,false,false,false,false,false,false};
                 IOReturn status=_workLoop->runAction(
                     [](OSObject *owner,void *opaque,void *,void *,void *) -> IOReturn {
-                        auto *self=static_cast<AirPortRTW89Front *>(owner);
+                        auto *self=static_cast<RTLAirLinkFront *>(owner);
                         auto *c=static_cast<ActionCall *>(opaque);
                         c->matches=owlyNativeBoundPeer(c->vif)==c->peer;
                         if(!c->matches)return kIOReturnNotReady;
@@ -578,7 +579,7 @@ bool AirPortRTW89Front::owlyNativeReceive(const struct owly_abi6_packet *pkt)
     }
     owlyNativeRelease(vif,peer);return submitted;
 }
-UInt32 AirPortRTW89Front::owlyNativeOutput(IO80211VirtualInterface *vif,mbuf_t m)
+UInt32 RTLAirLinkFront::owlyNativeOutput(IO80211VirtualInterface *vif,mbuf_t m)
 {
     if(!m)return kIOReturnOutputDropped;
     retain();IOLockLock(_owlyVifLock);

@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from ensure_sdk import ensure_sdk, valid_sdk, verify_sdk
 
-PINS = {'as.vit9696.Lilu': '38ACFA46-F60C-3795-B868-EF32F98C78ED', 'com.apple.iokit.IO80211FamilyLegacy': '4C07538B-62EB-3D6D-AEF9-93BCDCF45FAB', 'com.apple.iokit.IOSkywalkFamily': '035A9AD9-6CDE-362F-8DEC-B664BC6431EC', 'com.rtw89.driver': '5B55BA94-0573-37F0-A3B7-CA021167C0A3', 'com.rtw89.front': 'C79557B8-3F1C-3998-91BF-33B3F1F48D37', 'com.owly.airlink.eventbridge': '25DC81B8-52BC-38E8-9604-3A9190C8C1CA'}
+PINS = {'as.vit9696.Lilu': '38ACFA46-F60C-3795-B868-EF32F98C78ED', 'com.apple.iokit.IO80211FamilyLegacy': '4C07538B-62EB-3D6D-AEF9-93BCDCF45FAB', 'com.apple.iokit.IOSkywalkFamily': '035A9AD9-6CDE-362F-8DEC-B664BC6431EC', 'io.github.xnpty.RTLAirLink': '5B55BA94-0573-37F0-A3B7-CA021167C0A3', 'io.github.xnpty.RTLAirLink.front': 'C79557B8-3F1C-3998-91BF-33B3F1F48D37', 'io.github.xnpty.RTLAirLink.bridge': '25DC81B8-52BC-38E8-9604-3A9190C8C1CA'}
 
 
 def capture(command):

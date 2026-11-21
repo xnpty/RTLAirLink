@@ -12,7 +12,7 @@ def run(source,output,cc=None,cxx=None):
     with tempfile.TemporaryDirectory(prefix='owly-native-scan-') as folder:
         folder=Path(folder)
         (folder/'production_scan_builder.inc').write_text(extract_function((inc/'rtw89_glue.c').read_text(),'glue_scan_locked'))
-        native=(source/'src/kext/AirPortRTW89Native.cpp').read_text()
+        native=(source/'src/kext/RTLAirLinkNative.cpp').read_text()
         start=native.index('    case APPLE80211_IOC_SCAN_REQ:\n')
         end=native.index('    case APPLE80211_IOC_CURRENT_NETWORK:',start)
         (folder/'production_native_scan_cases.inc').write_text(native[start:end])

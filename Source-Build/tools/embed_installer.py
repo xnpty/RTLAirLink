@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write the released "Kext Installer.py": installer/Kext Installer.py with
-efi/configure.py built in, so it runs on its own next to AirPort_RTW89.kext.
+efi/configure.py built in, so it runs on its own next to RTLAirLink.kext.
 
 Usage: python3 tools/embed_installer.py OUT
 """

@@ -14,8 +14,8 @@ def run(source,output,cc=None,cxx=None):
     # Keep every new production runtime function and its alias/guard helpers;
     # the subclass itself is checked by real kernel-header compilation.
     beginning=runtime[:runtime.index('class OwlyNativeP2PInterface')]
-    body=runtime[runtime.index('bool AirPortRTW89Front::owlyNativeStart()'):]
-    header=(front/'AirPortRTW89Front.hpp').read_text()
+    body=runtime[runtime.index('bool RTLAirLinkFront::owlyNativeStart()'):]
+    header=(front/'RTLAirLinkFront.hpp').read_text()
     declarations=header.split('private:\n#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA\n',1)[1].split('\n#endif',1)[0]
     env=os.environ.copy();env['UBSAN_OPTIONS']='halt_on_error=1'
     if platform.system()=='Linux':env['ASAN_OPTIONS']='detect_leaks=0'

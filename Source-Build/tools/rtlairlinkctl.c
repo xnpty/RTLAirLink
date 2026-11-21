@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0
+/* RTLAirLink integration and release changes dated 2026-11-21. */
 /*
- * rtw89ctl: talk to a loaded AirPort_RTW89 kext.
+ * rtlairlinkctl: talk to a loaded RTLAirLink kext.
  *
- *   sudo rtw89ctl up        start the radio (power on, firmware, calibration)
- *   sudo rtw89ctl scan      start the radio if needed, scan, print the networks
- *   sudo rtw89ctl join SSID join a network from the last scan; asks for the
+ *   sudo rtlairlinkctl up        start the radio (power on, firmware, calibration)
+ *   sudo rtlairlinkctl scan      start the radio if needed, scan, print the networks
+ *   sudo rtlairlinkctl join SSID join a network from the last scan; asks for the
  *                           password (just press Return for an open network)
- *   sudo rtw89ctl leave     leave the network
- *   sudo rtw89ctl down      stop the radio
- *        rtw89ctl status    print what the kext has published
- *   sudo rtw89ctl flush on|off   pass on received frames whose status report
+ *   sudo rtlairlinkctl leave     leave the network
+ *   sudo rtlairlinkctl down      stop the radio
+ *        rtlairlinkctl status    print what the kext has published
+ *   sudo rtlairlinkctl flush on|off   pass on received frames whose status report
  *                           from the chip is missing after 1 ms (default on)
- *   sudo rtw89ctl ax on|off use 802.11ax where the network offers it (default
+ *   sudo rtlairlinkctl ax on|off use 802.11ax where the network offers it (default
  *                           on); takes effect at the next join
- *   sudo rtw89ctl rejoin on|off  join the network again when the connection
+ *   sudo rtlairlinkctl rejoin on|off  join the network again when the connection
  *                           is lost (default on)
- *   sudo rtw89ctl probe     test: check that the access point still answers,
+ *   sudo rtlairlinkctl probe     test: check that the access point still answers,
  *                           as the driver does when beacons go missing
- *   sudo rtw89ctl drop      test: drop the connection as if it had been lost
+ *   sudo rtlairlinkctl drop      test: drop the connection as if it had been lost
  *
  * Once a network is joined, traffic flows through the Ethernet-style
  * interface the kext publishes (the "interface" line of status, e.g. en7):
@@ -28,6 +29,7 @@
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
+#include <net/ethernet.h>
 #include <net/if.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -42,12 +44,13 @@ extern char **environ;
 
 static io_service_t find_service(void)
 {
-    return IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AirPort_RTW89"));
+    return IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("RTLAirLink"));
 }
 
 /* @ssid, @passphrase: sent along as raw bytes when not NULL (for "join"). */
-static kern_return_t send_command_join(io_service_t service, const char *command,
-                                       const char *ssid, const char *passphrase)
+static kern_return_t send_request(io_service_t service, const char *command,
+                                       const char *ssid, const char *passphrase,
+                                       const uint8_t *trace_peer)
 {
     CFStringRef value = CFStringCreateWithCString(NULL, command, kCFStringEncodingUTF8);
     CFMutableDictionaryRef dict = CFDictionaryCreateMutable(NULL, 2,
@@ -68,6 +71,11 @@ static kern_return_t send_command_join(io_service_t service, const char *command
         CFDictionarySetValue(dict, CFSTR("RTW89Passphrase"), data);
         CFRelease(data);
     }
+    if (trace_peer) {
+        CFDataRef data = CFDataCreate(NULL, trace_peer, ETHER_ADDR_LEN);
+        CFDictionarySetValue(dict, CFSTR("RTW89AWDLPeer"), data);
+        CFRelease(data);
+    }
     kr = IORegistryEntrySetCFProperties(service, dict);
 
     CFRelease(dict);
@@ -77,7 +85,7 @@ static kern_return_t send_command_join(io_service_t service, const char *command
 
 static kern_return_t send_command(io_service_t service, const char *command)
 {
-    return send_command_join(service, command, NULL, NULL);
+    return send_request(service, command, NULL, NULL, NULL);
 }
 
 static long get_long(io_service_t service, CFStringRef key)
@@ -215,14 +223,15 @@ static void print_link(io_service_t service)
     else
         printf("%-10s %s\n", "link", state);
     if (strcmp(state, "down")) {
-        static const char *const modes[] = { "802.11a/b/g", "802.11n", "802.11ac", "802.11ax" };
+        static const char *const modes[] = { "802.11a/b/g", "802.11n", "802.11ac", "802.11ax",
+                                            "802.11be" };
         long mode = get_long(service, CFSTR("RTW89 Link Mode"));
 
         printf("%-10s %s, %ld MHz, AID %ld\n", "network", bssid,
                get_long(service, CFSTR("RTW89 Link Frequency")),
                get_long(service, CFSTR("RTW89 Link AID")));
         printf("%-10s %s, %ld MHz wide (centre %ld MHz), %ld stream(s)%s\n", "channel",
-               mode >= 0 && mode <= 3 ? modes[mode] : "?",
+               mode >= 0 && mode <= 4 ? modes[mode] : "?",
                get_long(service, CFSTR("RTW89 Link Width")),
                get_long(service, CFSTR("RTW89 Link Center")),
                get_long(service, CFSTR("RTW89 Link Streams")),
@@ -364,11 +373,11 @@ static void print_results(io_service_t service)
         }
         name[out] = 0;
         {
-            static const char *const modes[] = { "a/b/g", "n", "ac", "ax" };
+            static const char *const modes[] = { "a/b/g", "n", "ac", "ax", "be" };
             long mode = get_number(bss, CFSTR("mode")), sec = get_number(bss, CFSTR("security"));
             char how[24], security[24];
 
-            snprintf(how, sizeof(how), "%s %ld", mode >= 0 && mode <= 3 ? modes[mode] : "?",
+            snprintf(how, sizeof(how), "%s %ld", mode >= 0 && mode <= 4 ? modes[mode] : "?",
                      get_number(bss, CFSTR("width")));
             /* what this driver can join: open and WPA2-PSK without required PMF */
             snprintf(security, sizeof(security), "%s%s",
@@ -395,7 +404,7 @@ int main(int argc, char **argv)
     int i;
 
     if (!service) {
-        fprintf(stderr, "AirPort_RTW89 is not loaded\n");
+        fprintf(stderr, "RTLAirLink is not loaded\n");
         return 1;
     }
 
@@ -434,6 +443,23 @@ int main(int argc, char **argv)
         }
         if (v)
             CFRelease(v);
+        return 0;
+    }
+
+    if (!strcmp(command, "awdl-rx-sample") || !strcmp(command, "awdl-rx-sample-stop")) {
+        const bool start = !strcmp(command, "awdl-rx-sample");
+        const struct ether_addr *peer = start && argc == 3 ? ether_aton(argv[2]) : NULL;
+
+        if ((start && !peer) || (!start && argc != 2)) {
+            fprintf(stderr, "usage: rtlairlinkctl awdl-rx-sample PEER_MAC|awdl-rx-sample-stop\n");
+            return 2;
+        }
+        kr = send_request(service, command, NULL, NULL, peer ? peer->octet : NULL);
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "%s failed: 0x%x%s\n", command, kr,
+                    kr == kIOReturnNotPrivileged ? " (run with sudo)" : "");
+            return 1;
+        }
         return 0;
     }
 
@@ -477,8 +503,8 @@ int main(int argc, char **argv)
          strcmp(command, "join") && strcmp(command, "leave") && strcmp(command, "probe") &&
          strcmp(command, "drop")) ||
         (!strcmp(command, "join") && argc < 3)) {
-        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|log|coex|probe|drop|flush on|off|ax on|off|"
-                        "rejoin on|off\n");
+        fprintf(stderr, "usage: rtlairlinkctl up|down|scan|join SSID|leave|status|log|coex|probe|drop|flush on|off|ax on|off|"
+                        "rejoin on|off|awdl-rx-sample PEER_MAC\n");
         return 2;
     }
 
@@ -487,7 +513,7 @@ int main(int argc, char **argv)
          * not end up in the shell history or the process list. */
         char *pass = getpass("Wi-Fi password (Return for an open network): ");
 
-        kr = send_command_join(service, command, argv[2], pass);
+        kr = send_request(service, command, argv[2], pass, NULL);
         memset(pass, 0, strlen(pass));
     } else {
         kr = send_command(service, command);
@@ -496,7 +522,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s failed: 0x%x%s\n", command, kr,
                 kr == kIOReturnNotPrivileged ? " (run with sudo)" : " (see the kernel log)");
         if (!strcmp(command, "join"))
-            fprintf(stderr, "is the network in the last scan (rtw89ctl scan), and is the "
+            fprintf(stderr, "is the network in the last scan (rtlairlinkctl scan), and is the "
                             "password 8 to 63 characters?\n");
         return 1;
     }

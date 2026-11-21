@@ -5,31 +5,31 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>English</string>
 	<key>CFBundleExecutable</key>
-	<string>AirPortRTW89Front</string>
+	<string>RTLAirLinkFront</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.rtw89.front</string>
+	<string>io.github.xnpty.RTLAirLink.front</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>RTLAirLinkFront</string>
 	<key>CFBundleDisplayName</key>
-	<string>RTLAirLinkFront</string>
+	<string>RTLAirLink Frontend</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>RTW89</key>
 		<dict>
 			<key>CFBundleIdentifier</key>
-			<string>com.rtw89.front</string>
+			<string>io.github.xnpty.RTLAirLink.front</string>
 			<key>IOClass</key>
-			<string>AirPortRTW89Front</string>
+			<string>RTLAirLinkFront</string>
 			<key>IOMatchCategory</key>
-			<string>AirPortRTW89Front</string>
+			<string>RTLAirLinkFront</string>
 			<!-- Higher than the driver's: IOKit starts the two one after the
 			     other on the card, and the driver waits in start() for the
 			     front, so the front must go first whatever the order of the

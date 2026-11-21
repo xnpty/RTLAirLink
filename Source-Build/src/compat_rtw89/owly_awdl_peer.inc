@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */ /* Modified 2026-11-15: BlockAck reply/dynamic-CAM fixes; see MODIFICATIONS.md. */
+/* RTLAirLink integration and release changes dated 2026-11-21. */
 /* Real observed AWDL radio peers. Wiphy owns CAM/firmware; RX only queues
  * control requests or packet ownership. No AP join, TDLS, synthetic TCP/TLS. */
 #include "owly_awdl_ba.h"
@@ -7,6 +8,8 @@
 struct owly_awdl_radio_peer {
  struct ieee80211_sta *sta;enum ieee80211_sta_state state;bool blocked;
  uint8_t mac[6],own[6];uint16_t ba_map;
+ bool rx_cam_seen;
+ uint8_t rx_cam_mac_id;
  struct owly_ba_request requests[16];struct owly_ba_ring reorder[16];
 };
 struct owly_awdl_control {uint8_t bytes[64];size_t length;uint64_t received,generation;};
@@ -31,26 +34,46 @@ static void owly_peer_init(void)
  owly_peer_fault=owly_peer_accepting=false;owly_control_sequence=0;
  owly_peer_ready_head=owly_peer_ready_count=0;INIT_WORK(&owly_peer_delivery_work,owly_peer_delivery_run);
 }
-struct owly_peer_packet_queues {struct list_head good,drop;};
+struct owly_peer_packet_queues {
+ struct list_head drop;
+ bool scheduled_delivery;
+};
+
+/* The reorder state and the ready queue share owly_peer_lock. Publish each
+ * released packet before unlocking so another RX cannot overtake it or move
+ * it into a new peer generation. Wake the worker after releasing the lock. */
 static void owly_peer_good(void *ctx,void *packet)
-{list_add_tail(&((struct sk_buff *)packet)->list,&((struct owly_peer_packet_queues *)ctx)->good);}
+{
+ struct owly_peer_packet_queues *queues=ctx;
+ struct sk_buff *skb=packet;
+ if(!glue.up || !glue.awdl_rx_wq || !owly_peer_accepting || owly_peer_ready_count==128){
+  list_add_tail(&skb->list,&queues->drop);
+  return;
+ }
+ const unsigned slot=(owly_peer_ready_head+owly_peer_ready_count)%128;
+ owly_peer_ready[slot].skb=skb;
+ owly_peer_ready[slot].generation=owly_peer_generation;
+ ++owly_peer_ready_count;
+ queues->scheduled_delivery=true;
+}
+
 static void owly_peer_bad(void *ctx,void *packet)
 {list_add_tail(&((struct sk_buff *)packet)->list,&((struct owly_peer_packet_queues *)ctx)->drop);}
 static void owly_peer_queues_init(struct owly_peer_packet_queues *q)
-{INIT_LIST_HEAD(&q->good);INIT_LIST_HEAD(&q->drop);}
+{
+ INIT_LIST_HEAD(&q->drop);
+ q->scheduled_delivery=false;
+}
 static void owly_peer_queues_finish(struct owly_peer_packet_queues *q)
 {
- struct sk_buff *skb;
- while(!list_empty(&q->drop)){skb=list_first_entry(&q->drop,struct sk_buff,list);list_del(&skb->list);kfree_skb(skb);}
- while(!list_empty(&q->good)){
-  skb=list_first_entry(&q->good,struct sk_buff,list);list_del(&skb->list);bool queued=false;
-  spin_lock(&owly_peer_lock);
-  if(glue.up && glue.awdl_rx_wq && owly_peer_accepting && owly_peer_ready_count<128){
-   const unsigned at=(owly_peer_ready_head+owly_peer_ready_count)%128;
-   owly_peer_ready[at].skb=skb;owly_peer_ready[at].generation=owly_peer_generation;++owly_peer_ready_count;queued=true;
-  }
-  spin_unlock(&owly_peer_lock);
-  if(queued)queue_work(glue.awdl_rx_wq,&owly_peer_delivery_work);else kfree_skb(skb);
+ if(q->scheduled_delivery){
+  q->scheduled_delivery=false;
+  queue_work(glue.awdl_rx_wq,&owly_peer_delivery_work);
+ }
+ while(!list_empty(&q->drop)){
+  struct sk_buff *skb=list_first_entry(&q->drop,struct sk_buff,list);
+  list_del(&skb->list);
+  kfree_skb(skb);
  }
 }
 static void owly_peer_delivery_run(struct work_struct *work)
@@ -85,6 +108,21 @@ static struct owly_awdl_radio_peer *owly_peer_find(const uint8_t mac[6])
  for(unsigned i=0;i<4;i++)if(owly_radio_peers[i].sta && !memcmp(owly_radio_peers[i].mac,mac,6))return &owly_radio_peers[i];
  return NULL;
 }
+
+/* The PCI RX descriptor reports the context selected by the hardware.
+ * An AWDL data frame can hit the auxiliary VIF entry before the peer entry. */
+void rtw89_awdl_note_rx_cam(const uint8_t source[6], const uint8_t destination[6],
+                           uint8_t mac_id)
+{
+ spin_lock(&owly_peer_lock);
+ struct owly_awdl_radio_peer *p = owly_peer_find(source);
+ if (p && !memcmp(destination, p->own, sizeof(p->own))) {
+  p->rx_cam_seen = true;
+  p->rx_cam_mac_id = mac_id;
+ }
+ spin_unlock(&owly_peer_lock);
+}
+
 static struct ieee80211_sta *owly_peer_tx_station(const uint8_t destination[6])
 {
  struct owly_awdl_radio_peer *p=owly_peer_find(destination);
@@ -165,7 +203,8 @@ static bool owly_peer_known_locked(const uint8_t mac[6],uint64_t now)
 }
 static bool owly_peer_reply_due(const struct owly_awdl_control *c)
 {
- const uint64_t now=glue_now_us();spin_lock(&owly_link_lock);
+ spin_lock(&owly_link_lock);
+ const uint64_t now=glue_now_us();
  const bool ready=c->generation==owly_link_state.generation && now>=c->received && now-c->received<=OWLY_LINK_PEER_TTL_US &&
   owly_peer_known_locked(c->bytes+10,now) && owly_link_unicast_reply_tx_ready(&owly_link_state,c->bytes+10,now);
  spin_unlock(&owly_link_lock);return ready;
@@ -175,7 +214,9 @@ static bool owly_peer_control_rx(struct sk_buff *skb)
  uint8_t own[6];uint64_t generation;bool valid;struct owly_ba_request request;
  const size_t n=skb->len-FCS_LEN;const uint8_t *raw=skb->data;
  if(n<26 || raw[0]!=0xd0 || raw[24]!=3)return false;
- const uint64_t now=glue_now_us();spin_lock(&owly_link_lock);memcpy(own,owly_link_state.local,6);generation=owly_link_state.generation;
+ spin_lock(&owly_link_lock);
+ const uint64_t now=glue_now_us();
+ memcpy(own,owly_link_state.local,6);generation=owly_link_state.generation;
  valid=owly_peer_known_locked(raw+10,now);spin_unlock(&owly_link_lock);
  if(!valid || !owly_ba_parse(raw,n,own,&request))return false;
  spin_lock(&owly_peer_lock);
@@ -187,6 +228,7 @@ static bool owly_peer_data_rx(struct sk_buff *skb)
 {
  const uint8_t *raw=skb->data;const size_t n=skb->len-FCS_LEN;
  if(n<26 || raw[0]!=0x88 || (raw[1]&0x47) || (raw[4]&1u) || (owly_ba_le16(raw+22)&15u))return false;
+ if((raw[24]&IEEE80211_QOS_CTL_ACK_POLICY_MASK)==IEEE80211_QOS_CTL_ACK_POLICY_NOACK)return false;
  static const uint8_t b[6]={0,0x25,0,0xff,0x94,0x73};if(memcmp(raw+16,b,6))return false;
  struct owly_peer_packet_queues q;owly_peer_queues_init(&q);bool consumed=false;spin_lock(&owly_peer_lock);
  struct owly_awdl_radio_peer *p=owly_peer_find(raw+10);const unsigned tid=raw[24]&15u;
@@ -204,11 +246,13 @@ static bool owly_peer_bar_rx(struct sk_buff *skb)
  spin_unlock(&owly_peer_lock);owly_peer_queues_finish(&q);if(consumed)kfree_skb(skb);
  return consumed;
 }
-static void owly_peer_tick(struct ieee80211_channel *ch,uint64_t now)
+static void owly_peer_tick(struct ieee80211_channel *ch)
 {
  lockdep_assert_wiphy(glue_hw()->wiphy);if(!ch || glue.scanning || !owly_core04c_vif || !glue.awdl_rx_wq)return;
  uint8_t addresses[OWLY_LINK_PEERS][6],own[6];unsigned count=0;uint64_t generation;
- spin_lock(&owly_link_lock);generation=owly_link_state.generation;memcpy(own,owly_link_state.local,6);
+ spin_lock(&owly_link_lock);
+ const uint64_t now=glue_now_us();
+ generation=owly_link_state.generation;memcpy(own,owly_link_state.local,6);
  for(unsigned i=0;i<OWLY_LINK_PEERS;i++)if(owly_peer_known_locked(owly_link_state.peers[i].mac,now))memcpy(addresses[count++],owly_link_state.peers[i].mac,6);
  spin_unlock(&owly_link_lock);
  if(generation!=owly_peer_generation){owly_peer_close_all();spin_lock(&owly_peer_lock);owly_peer_generation=generation;spin_unlock(&owly_peer_lock);}
@@ -228,27 +272,66 @@ static void owly_peer_tick(struct ieee80211_channel *ch,uint64_t now)
   struct owly_awdl_control c;bool pending;spin_lock(&owly_peer_lock);pending=owly_control_count!=0;
   if(pending)c=owly_controls[owly_control_head];
   spin_unlock(&owly_peer_lock);if(!pending)break;
-  bool due=false;spin_lock(&owly_link_lock);const bool known=owly_peer_known_locked(c.bytes+10,now);
-  if(known)due=owly_link_unicast_reply_tx_ready(&owly_link_state,c.bytes+10,now);
+  spin_lock(&owly_link_lock);
+  const uint64_t check_us=glue_now_us();
+  const bool known=owly_peer_known_locked(c.bytes+10,check_us);
+  const bool due=known && owly_link_unicast_reply_tx_ready(&owly_link_state,c.bytes+10,check_us);
   spin_unlock(&owly_link_lock);
-  const bool stale=c.generation!=generation || now<c.received || now-c.received>OWLY_LINK_PEER_TTL_US || !known;
+  const bool stale=c.generation!=generation || check_us<c.received ||
+    check_us-c.received>OWLY_LINK_PEER_TTL_US || !known;
   if(!stale && !due)break;
   struct owly_ba_request r;uint8_t response[33];int rc=0;uint16_t status=37;struct owly_awdl_radio_peer *p=owly_peer_find(c.bytes+10);
   if(!stale && owly_ba_parse(c.bytes,c.length,own,&r) && p && !p->blocked){
    if(r.action==0){
-    const unsigned tid=r.tid;const struct owly_ba_request *old=&p->requests[tid];
-    const bool duplicate=(p->ba_map&(1u<<tid)) && old->token==r.token && old->ssn==r.ssn && old->window==r.window && old->timeout==r.timeout;
-    if(r.immediate && !duplicate){
-     spin_lock(&owly_peer_lock);const bool active=p->ba_map&(1u<<tid);p->ba_map&=~(1u<<tid);owly_ba_clear(&p->reorder[tid],owly_peer_bad,&q);spin_unlock(&owly_peer_lock);owly_peer_queues_finish(&q);
-     if(active)rc=owly_peer_ba_firmware(p,tid,false,0,0);
-     if(!rc)rc=owly_peer_ba_firmware(p,tid,true,r.ssn,r.window);
-     if(!rc){spin_lock(&owly_peer_lock);owly_ba_start(&p->reorder[tid],r.ssn,r.window);p->requests[tid]=r;p->ba_map|=1u<<tid;spin_unlock(&owly_peer_lock);status=0;}
-    }else if(r.immediate && duplicate)status=0;else status=38;
+    const unsigned tid = r.tid;
+    const uint16_t tid_bit = (uint16_t)(1u << tid);
+    const struct owly_ba_request *old = &p->requests[tid];
+    const struct rtw89_sta_link *sta_link = sta_to_rtwsta(p->sta)->links[p->sta->deflink.link_id];
+    const int sta_mac_id = sta_link ? sta_link->mac_id : -1;
+
+    spin_lock(&owly_peer_lock);
+    const int rx_mac_id = p->rx_cam_seen ? p->rx_cam_mac_id : -1;
+    const bool active = (p->ba_map & tid_bit) != 0;
+    const bool matching_cam = rx_mac_id >= 0 && rx_mac_id == sta_mac_id;
+    const bool duplicate = active && old->token == r.token && old->ssn == r.ssn &&
+        old->window == r.window && old->timeout == r.timeout;
+    const bool replace = r.immediate && !(duplicate && matching_cam);
+    if (replace) {
+     p->ba_map &= (uint16_t)~tid_bit;
+     while (p->reorder[tid].active && p->reorder[tid].stored)
+      owly_ba_advance(&p->reorder[tid], owly_peer_good, &q);
+     owly_ba_clear(&p->reorder[tid], owly_peer_bad, &q);
+    }
+    spin_unlock(&owly_peer_lock);
+    owly_peer_queues_finish(&q);
+
+    if (!r.immediate) {
+     status = 38;
+    } else if (!replace) {
+     status = 0;
+    } else {
+     if (active)
+      rc = owly_peer_ba_firmware(p, tid, false, 0, 0);
+     /* A BA CAM keyed to a different MAC ID cannot acknowledge this RX
+      * stream. Decline ADDBA so the peer can continue with ordinary ACKs. */
+     if (!rc && matching_cam) {
+      rc = owly_peer_ba_firmware(p, tid, true, r.ssn, r.window);
+      if (!rc) {
+       spin_lock(&owly_peer_lock);
+       owly_ba_start(&p->reorder[tid], r.ssn, r.window);
+       p->requests[tid] = r;
+       p->ba_map |= tid_bit;
+       spin_unlock(&owly_peer_lock);
+       status = 0;
+      }
+     }
+    }
     if(!owly_peer_reply_due(&c))break; /* H2C may cross the end of a shared AW. */
     owly_ba_response(c.bytes,own,&r,status,owly_control_sequence++,response);const int tx=owly_sync_submit(ch,response,33,false);
-    IOLog("OWLY AWDL BlockAck: tid=%u token=%u window=%u status=%u firmware=%d tx=%d peer=%02x:%02x:%02x:%02x:%02x:%02x delay_us=%llu (not TCP/TLS)\n",
-     (unsigned)r.tid,(unsigned)r.token,(unsigned)r.window,(unsigned)status,rc,tx,
-     c.bytes[10],c.bytes[11],c.bytes[12],c.bytes[13],c.bytes[14],c.bytes[15],
+    IOLog("OWLY AWDL BlockAck: tid=%u token=%u ssn=%u window=%u status=%u firmware=%d tx=%d "
+          "rx_mac_id=%d sta_mac_id=%d delay_us=%llu\n",
+     (unsigned)r.tid,(unsigned)r.token,(unsigned)r.ssn,(unsigned)r.window,(unsigned)status,rc,tx,
+     rx_mac_id,sta_mac_id,
      (unsigned long long)(glue_now_us()-c.received));
     if(tx==-ENOMEM || tx==-ENOSPC || tx==-EBUSY)break;
    }else if(r.action==2 && r.initiator){

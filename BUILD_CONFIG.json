@@ -1628,8 +1628,8 @@
   "legacy_uuid": "4C07538B-62EB-3D6D-AEF9-93BCDCF45FAB",
   "bundle_names": {
     "backend": "RTLAirLink.kext",
-    "frontend": "AirPortRTW89Front.kext",
+    "frontend": "RTLAirLinkFront.kext",
     "bridge": "RTLAirBridge.kext"
   },
-  "release_version": "0.1.0"
+  "release_version": "0.2.0"
 }

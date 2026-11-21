@@ -1,9 +1,18 @@
 {
-  "upstream_guide": "https://github.com/FranciumOS-org/AirPort_RTW89/blob/main/README.md",
   "provider_repository": "dortania/OpenCore-Legacy-Patcher",
   "provider_commit": "d9604c36a432eaf243ea18659ff4d208187452d7",
-  "note": "External dependencies identified by the upstream installation guide; not redistributed in the RTLAirLink binary/source archive. Download directly from the pinned provider URLs.",
+  "note": "RTLAirLink downloads these pinned dependencies from their release providers.",
   "dependencies": [
+    {
+      "bundle": "Lilu.kext",
+      "filename": "Lilu-1.7.3-RELEASE.zip",
+      "url": "https://github.com/dortania/build-repo/releases/download/Lilu-0249c3a/Lilu-1.7.3-RELEASE.zip",
+      "sha256": "9a453e5d47b05b2bebe301095e0872ade0e622dadd9ad5e5c01a2fce17904049",
+      "size": 760078,
+      "bundle_identifier": "as.vit9696.Lilu",
+      "bundle_version": "1.7.3",
+      "executable_sha256": "6bc64e6d9e1b4dd1f7c6477365d0b7f14734aa00be76321205e1e7a105d4340b"
+    },
     {
       "bundle": "IOSkywalkFamily.kext",
       "filename": "IOSkywalkFamily-v1.2.0.zip",
@@ -37,5 +46,13 @@
       "executable_sha256": "4c35bc196d35c69b5f9dca83fe733801211c7828716f51585c7f5450039ca884",
       "executable_uuid_description": "UUID: 7DF1CDFC-7EFE-3D82-A3A2-7DACE8B1D097 (x86_64)"
     }
-  ]
+  ],
+  "validator": {
+    "version": "1.0.9",
+    "filename": "OpenCore-1.0.9-RELEASE.zip",
+    "url": "https://github.com/dortania/build-repo/releases/download/OpenCorePkg-ebea824/OpenCore-1.0.9-RELEASE.zip",
+    "sha256": "647cb6ba6aedf9a05da3058c7c11175d14720d486901cd390f714d0da34d6078",
+    "size": 10453149,
+    "member": "Utilities/ocvalidate/ocvalidate"
+  }
 }

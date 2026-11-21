@@ -3,10 +3,10 @@
 The release files are also published as an OCI artifact in GitHub Packages:
 
 ```text
-ghcr.io/taingo936-ui/rtlairlink:v0.1.0
+ghcr.io/xnpty/rtlairlink:v0.1.0
 ```
 
-Package page: <https://github.com/users/taingo936-ui/packages/container/package/rtlairlink>.
+Package page: <https://github.com/users/xnpty/packages/container/package/rtlairlink>.
 
 This artifact contains the exact five files from the matching GitHub Release:
 the paired kext ZIP, corresponding source ZIP, build report, release manifest
@@ -18,7 +18,7 @@ on the supported Intel Mac using [INSTALL.md](INSTALL.md).
 Install [ORAS](https://oras.land/docs/installation), then pull the files:
 
 ```bash
-oras pull ghcr.io/taingo936-ui/rtlairlink:v0.1.0 --output RTLAirLink-v0.1.0
+oras pull ghcr.io/xnpty/rtlairlink:v0.1.0 --output RTLAirLink-v0.1.0
 cd RTLAirLink-v0.1.0
 shasum -a 256 -c SHA256SUMS
 ```
@@ -29,7 +29,7 @@ Use a GitHub personal access token (classic) with `read:packages` and supply it 
 The newly created package is private and linked to this repository. Access is
 inherited from the repository under GitHub's default package settings.
 
-You can also download the ZIP directly from [Releases](https://github.com/taingo936-ui/RTLAirLink/releases).
+You can also download the ZIP directly from [Releases](https://github.com/xnpty/RTLAirLink/releases).
 
 ## Publish an existing release
 

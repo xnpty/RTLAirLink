@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* The idle-channel transaction follows FranciumOS-org/AirPort_RTW89's
+/* RTLAirLink integration and release changes dated 2026-11-21. */
+/* RTLAirLink names and module metadata updated 2026-11-21. */
+/* Modified for RTLAirLink: no unassign_vif_chanctx call on chips without one. */
+/* The idle-channel transaction follows FranciumOS-org/RTLAirLink's
  * rtw89_mlme_awdl_hold_channel(), with the auxiliary-VIF release hook and
  * the existing regulatory checks retained. Called only under wiphy. */
 int rtw89_compat_awdl_self_addr(struct ieee80211_vif *vif,const u8 *addr,bool force);
@@ -34,7 +37,10 @@ static void owly_mlme_release_chanctx(void)
         if (owly_core04d_before_release)
             owly_core04d_before_release(mlme.chanctx);
         if (mlme.chanctx_assigned) {
-            ops->unassign_vif_chanctx(mlme.hw, mlme.vif, conf, mlme.chanctx);
+            /* absent when rtw89 emulates channel contexts (RTL8851B,
+             * RTL8852A): every join's release comes through here */
+            if (ops->unassign_vif_chanctx)
+                ops->unassign_vif_chanctx(mlme.hw, mlme.vif, conf, mlme.chanctx);
             conf->chanctx_conf = NULL;
             mlme.chanctx_assigned = false;
         }

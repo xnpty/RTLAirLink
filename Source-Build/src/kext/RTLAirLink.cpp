@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-#include "AirPortRTW89.hpp"
+/* RTLAirLink names and module metadata updated 2026-11-21. */
+#include "../rtw89_release.h"
+#include "RTLAirLink.hpp"
 #include "rtw89_chips.h"
 
 #include <IOKit/IOLib.h>
@@ -16,17 +18,17 @@ size_t rtw89_logring_copy(char *out, size_t max);
 }
 
 #define super IOEthernetController
-OSDefineMetaClassAndStructors(AirPort_RTW89, IOEthernetController)
+OSDefineMetaClassAndStructors(RTLAirLink, IOEthernetController)
 
-#define LOG(fmt, ...) IOLog("AirPort_RTW89: " fmt "\n", ##__VA_ARGS__)
+#define LOG(fmt, ...) IOLog("RTLAirLink: " fmt "\n", ##__VA_ARGS__)
 
 /* ------------------------------------------------------------------ */
 /*  Platform services for the Linux side                                */
 /* ------------------------------------------------------------------ */
 
-uint32_t AirPort_RTW89::cfgRead(void *ctx, unsigned int offset, unsigned int width)
+uint32_t RTLAirLink::cfgRead(void *ctx, unsigned int offset, unsigned int width)
 {
-    IOPCIDevice *pci = static_cast<AirPort_RTW89 *>(ctx)->_pci;
+    IOPCIDevice *pci = static_cast<RTLAirLink *>(ctx)->_pci;
 
     /* The extended accessors reach all 4 KB of PCIe config space; the driver
      * uses registers above 0xff (ASPM/L1 controls at 0x7xx). */
@@ -37,10 +39,10 @@ uint32_t AirPort_RTW89::cfgRead(void *ctx, unsigned int offset, unsigned int wid
     }
 }
 
-void AirPort_RTW89::cfgWrite(void *ctx, unsigned int offset, unsigned int width,
+void RTLAirLink::cfgWrite(void *ctx, unsigned int offset, unsigned int width,
                              uint32_t value)
 {
-    IOPCIDevice *pci = static_cast<AirPort_RTW89 *>(ctx)->_pci;
+    IOPCIDevice *pci = static_cast<RTLAirLink *>(ctx)->_pci;
 
     switch (width) {
     case 1:  pci->extendedConfigWrite8(offset, (UInt8)value); break;
@@ -55,7 +57,7 @@ void AirPort_RTW89::cfgWrite(void *ctx, unsigned int offset, unsigned int width,
  * case on this machine (macOS has no AMD-Vi support) and on Intel hackintoshes
  * run with DisableIoMapper.
  */
-void *AirPort_RTW89::dmaAlloc(void *ctx, size_t size, uint64_t *busAddr, void **cookie)
+void *RTLAirLink::dmaAlloc(void *ctx, size_t size, uint64_t *busAddr, void **cookie)
 {
     IOBufferMemoryDescriptor *desc;
     IOByteCount segLen = 0;
@@ -84,7 +86,7 @@ void *AirPort_RTW89::dmaAlloc(void *ctx, size_t size, uint64_t *busAddr, void **
     return desc->getBytesNoCopy();
 }
 
-void AirPort_RTW89::dmaFree(void *ctx, void *cookie)
+void RTLAirLink::dmaFree(void *ctx, void *cookie)
 {
     IOBufferMemoryDescriptor *desc = static_cast<IOBufferMemoryDescriptor *>(cookie);
 
@@ -96,7 +98,7 @@ void AirPort_RTW89::dmaFree(void *ctx, void *cookie)
 /*  Interrupt                                                           */
 /* ------------------------------------------------------------------ */
 
-bool AirPort_RTW89::setupInterrupt()
+bool RTLAirLink::setupInterrupt()
 {
     int index = 0, msiIndex = -1, type = 0;
 
@@ -118,7 +120,7 @@ bool AirPort_RTW89::setupInterrupt()
     _interrupt = IOInterruptEventSource::interruptEventSource(
         this,
         OSMemberFunctionCast(IOInterruptEventSource::Action, this,
-                             &AirPort_RTW89::interruptOccurred),
+                             &RTLAirLink::interruptOccurred),
         _pci, msiIndex >= 0 ? msiIndex : 0);
     if (!_interrupt)
         return false;
@@ -131,14 +133,14 @@ bool AirPort_RTW89::setupInterrupt()
     return true;
 }
 
-void AirPort_RTW89::interruptOccurred(IOInterruptEventSource *source, int count)
+void RTLAirLink::interruptOccurred(IOInterruptEventSource *source, int count)
 {
     rtw89_glue_interrupt();
 }
 
-void AirPort_RTW89::irqEnable(void *ctx, bool enable)
+void RTLAirLink::irqEnable(void *ctx, bool enable)
 {
-    IOInterruptEventSource *source = static_cast<AirPort_RTW89 *>(ctx)->_interrupt;
+    IOInterruptEventSource *source = static_cast<RTLAirLink *>(ctx)->_interrupt;
 
     if (!source)
         return;
@@ -152,32 +154,32 @@ void AirPort_RTW89::irqEnable(void *ctx, bool enable)
 /*  Network interface                                                   */
 /* ------------------------------------------------------------------ */
 
-bool AirPort_RTW89::createWorkLoop()
+bool RTLAirLink::createWorkLoop()
 {
     if (!_netWorkLoop)
         _netWorkLoop = IOWorkLoop::workLoop();
     return _netWorkLoop != nullptr;
 }
 
-IOWorkLoop *AirPort_RTW89::getWorkLoop() const
+IOWorkLoop *RTLAirLink::getWorkLoop() const
 {
     return _netWorkLoop;
 }
 
-const OSString *AirPort_RTW89::newVendorString() const
+const OSString *RTLAirLink::newVendorString() const
 {
     return OSString::withCString("Realtek");
 }
 
-const OSString *AirPort_RTW89::newModelString() const
+const OSString *RTLAirLink::newModelString() const
 {
     /* Modified 2026-11-15: display branding; retain the detected Realtek chip. */
     char model[96];
-    snprintf(model, sizeof(model), "RTLAirLink (%s)", rtw89_chip_name(_deviceID));
+    snprintf(model, sizeof(model), "RTLAirLink " RTLAIRLINK_VERSION " (%s)", rtw89_chip_name(_deviceID));
     return OSString::withCString(model);
 }
 
-IOReturn AirPort_RTW89::getHardwareAddress(IOEthernetAddress *addr)
+IOReturn RTLAirLink::getHardwareAddress(IOEthernetAddress *addr)
 {
     *addr = _mac;
     return kIOReturnSuccess;
@@ -185,7 +187,7 @@ IOReturn AirPort_RTW89::getHardwareAddress(IOEthernetAddress *addr)
 
 /* The chip passes unicast for us, broadcast and the multicast of the network
  * it has joined; there is nothing to program per group address. */
-IOReturn AirPort_RTW89::getPacketFilters(const OSSymbol *group, UInt32 *filters) const
+IOReturn RTLAirLink::getPacketFilters(const OSSymbol *group, UInt32 *filters) const
 {
     if (group == gIONetworkFilterGroup) {
         *filters = kIOPacketFilterUnicast | kIOPacketFilterBroadcast |
@@ -195,22 +197,22 @@ IOReturn AirPort_RTW89::getPacketFilters(const OSSymbol *group, UInt32 *filters)
     return super::getPacketFilters(group, filters);
 }
 
-IOReturn AirPort_RTW89::setPromiscuousMode(bool active)
+IOReturn RTLAirLink::setPromiscuousMode(bool active)
 {
     return kIOReturnSuccess;
 }
 
-IOReturn AirPort_RTW89::setMulticastMode(bool active)
+IOReturn RTLAirLink::setMulticastMode(bool active)
 {
     return kIOReturnSuccess;
 }
 
-IOReturn AirPort_RTW89::setMulticastList(IOEthernetAddress *addrs, UInt32 count)
+IOReturn RTLAirLink::setMulticastList(IOEthernetAddress *addrs, UInt32 count)
 {
     return kIOReturnSuccess;
 }
 
-bool AirPort_RTW89::configureInterface(IONetworkInterface *netif)
+bool RTLAirLink::configureInterface(IONetworkInterface *netif)
 {
     IONetworkData *data;
 
@@ -236,17 +238,17 @@ bool AirPort_RTW89::configureInterface(IONetworkInterface *netif)
 
 /*
  * The stack brings the interface up or down. The radio is not tied to that:
- * it is started and a network joined with rtw89ctl, and the link state tells
+ * it is started and a network joined with rtlairlinkctl, and the link state tells
  * the stack when there is somewhere to send to.
  */
-IOReturn AirPort_RTW89::enable(IONetworkInterface *netif)
+IOReturn RTLAirLink::enable(IONetworkInterface *netif)
 {
     _netifEnabled = true;
     netif->startOutputThread();
     return kIOReturnSuccess;
 }
 
-IOReturn AirPort_RTW89::disable(IONetworkInterface *netif)
+IOReturn RTLAirLink::disable(IONetworkInterface *netif)
 {
     _netifEnabled = false;
     /* returns once no thread is inside outputStart() */
@@ -257,7 +259,7 @@ IOReturn AirPort_RTW89::disable(IONetworkInterface *netif)
 
 /* One Ethernet frame from the stack: copied into the driver's own buffer and
  * the mbuf freed. False if the frame was dropped. */
-bool AirPort_RTW89::transmit(mbuf_t m)
+bool RTLAirLink::transmit(mbuf_t m)
 {
     size_t len = mbuf_pkthdr_len(m);
     uint8_t *frame = nullptr;
@@ -287,7 +289,7 @@ bool AirPort_RTW89::transmit(mbuf_t m)
  * as many as the driver has room for. kIOReturnNoResources leaves the rest
  * queued until txWake() says there is room again.
  */
-IOReturn AirPort_RTW89::outputStart(IONetworkInterface *netif, IOOptionBits options)
+IOReturn RTLAirLink::outputStart(IONetworkInterface *netif, IOOptionBits options)
 {
     IOReturn result = kIOReturnSuccess;
 
@@ -315,7 +317,7 @@ IOReturn AirPort_RTW89::outputStart(IONetworkInterface *netif, IOOptionBits opti
 }
 
 /* Not used with the pull model; kept for callers of the old entry point. */
-UInt32 AirPort_RTW89::outputPacket(mbuf_t m, void *param)
+UInt32 RTLAirLink::outputPacket(mbuf_t m, void *param)
 {
     bool sent;
 
@@ -326,9 +328,9 @@ UInt32 AirPort_RTW89::outputPacket(mbuf_t m, void *param)
 }
 
 /* The driver has room for frames again. A driver thread. */
-void AirPort_RTW89::txWake(void *ctx)
+void RTLAirLink::txWake(void *ctx)
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    RTLAirLink *me = static_cast<RTLAirLink *>(ctx);
 
     if (me->_native) {
         if (me->_dataReady)
@@ -340,9 +342,9 @@ void AirPort_RTW89::txWake(void *ctx)
 }
 
 /* One received Ethernet frame, on the driver's receive thread. */
-void AirPort_RTW89::rxFrame(void *ctx, const uint8_t *frame, size_t len)
+void RTLAirLink::rxFrame(void *ctx, const uint8_t *frame, size_t len)
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    RTLAirLink *me = static_cast<RTLAirLink *>(ctx);
     mbuf_t m;
 
     if (me->_native) {
@@ -367,7 +369,7 @@ void AirPort_RTW89::rxFrame(void *ctx, const uint8_t *frame, size_t len)
     me->_netStats->inputPackets++;
 }
 
-bool AirPort_RTW89::setupInterface()
+bool RTLAirLink::setupInterface()
 {
     struct rtw89_glue_info info;
 
@@ -397,7 +399,7 @@ bool AirPort_RTW89::setupInterface()
 /*  IOService                                                           */
 /* ------------------------------------------------------------------ */
 
-bool AirPort_RTW89::start(IOService *provider)
+bool RTLAirLink::start(IOService *provider)
 {
     struct rtw89_glue_platform platform = {};
     struct rtw89_glue_device device = {};
@@ -514,7 +516,7 @@ bool AirPort_RTW89::start(IOService *provider)
 
     /* With the front in the registry this is the Wi-Fi device's driver;
      * without it, an Ethernet-style interface of our own. */
-    _powerNotifier = registerPrioritySleepWakeInterest(&AirPort_RTW89::powerEvent, this);
+    _powerNotifier = registerPrioritySleepWakeInterest(&RTLAirLink::powerEvent, this);
     if (connectFront()) {
         /* Wi-Fi is on until macOS says otherwise */
         int up = radioUp();
@@ -532,7 +534,7 @@ bool AirPort_RTW89::start(IOService *provider)
     return true;
 }
 
-void AirPort_RTW89::publishInfo()
+void RTLAirLink::publishInfo()
 {
     struct rtw89_glue_info info;
     char mac[18];
@@ -556,7 +558,7 @@ void AirPort_RTW89::publishInfo()
 /*  Commands from user space                                            */
 /* ------------------------------------------------------------------ */
 
-void AirPort_RTW89::publishScanResults()
+void RTLAirLink::publishScanResults()
 {
     static const unsigned int kMax = 128;
     struct rtw89_glue_bss *list;
@@ -634,15 +636,16 @@ void AirPort_RTW89::publishScanResults()
 
 /* Called from the driver's own thread on every link state change, with driver
  * locks held: only publish, never take _commandLock or call back in. */
-void AirPort_RTW89::linkChanged(void *ctx)
+void RTLAirLink::linkChanged(void *ctx)
 {
-    static_cast<AirPort_RTW89 *>(ctx)->publishLink();
+    static_cast<RTLAirLink *>(ctx)->publishLink();
 }
 
 /* "1201.0 Mb/s (802.11ax MCS 11, 2 streams, 80 MHz)", or nothing when unknown. */
 static void describeRate(const struct rtw89_glue_rate &rate, char *buf, size_t len)
 {
-    static const char *const kModes[] = { "802.11a/b/g", "802.11n", "802.11ac", "802.11ax" };
+    static const char *const kModes[] = { "802.11a/b/g", "802.11n", "802.11ac", "802.11ax",
+                                          "802.11be" };
 
     buf[0] = 0;
     if (!rate.kbps)
@@ -651,11 +654,11 @@ static void describeRate(const struct rtw89_glue_rate &rate, char *buf, size_t l
         snprintf(buf, len, "%u.%u Mb/s (802.11a/b/g)", rate.kbps / 1000, rate.kbps % 1000 / 100);
     else
         snprintf(buf, len, "%u.%u Mb/s (%s MCS %u, %u stream%s, %u MHz)", rate.kbps / 1000,
-                 rate.kbps % 1000 / 100, kModes[rate.mode & 3], rate.mcs, rate.nss,
+                 rate.kbps % 1000 / 100, kModes[rate.mode <= 4 ? rate.mode : 0], rate.mcs, rate.nss,
                  rate.nss == 1 ? "" : "s", rate.width);
 }
 
-void AirPort_RTW89::publishLink()
+void RTLAirLink::publishLink()
 {
     static const char *const kStates[] = { "down", "joining", "associated", "connected" };
     struct rtw89_glue_link link;
@@ -730,7 +733,7 @@ void AirPort_RTW89::publishLink()
     }
 }
 
-IOReturn AirPort_RTW89::setProperties(OSObject *properties)
+IOReturn RTLAirLink::setProperties(OSObject *properties)
 {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
     OSString *command = dict ? OSDynamicCast(OSString, dict->getObject("RTW89Command")) : nullptr;
@@ -746,7 +749,7 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
         return kIOReturnNotPrivileged;
 
     if (command->isEqualTo("log")) {
-        /* the driver's log ring, published for rtw89ctl log to read */
+        /* the driver's log ring, published for rtlairlinkctl log to read */
         const size_t max = 64 * 1024;
         char *text = static_cast<char *>(IOMallocZero(max + 1));
         OSString *s;
@@ -764,7 +767,7 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
     }
 
     if (command->isEqualTo("coex")) {
-        /* the Wi-Fi/Bluetooth coexistence report, for rtw89ctl coex */
+        /* the Wi-Fi/Bluetooth coexistence report, for rtlairlinkctl coex */
         const size_t max = 32 * 1024;
         char *text = static_cast<char *>(IOMallocZero(max + 1));
         OSString *s;
@@ -786,6 +789,17 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
     IOLockLock(_commandLock);
     if (!_probed) {
         result = kIOReturnNotReady;
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    } else if (command->isEqualTo("awdl-rx-sample")) {
+        OSData *peer = OSDynamicCast(OSData, dict->getObject("RTW89AWDLPeer"));
+
+        if (!peer || peer->getLength() != 6)
+            result = kIOReturnBadArgument;
+        else
+            ret = rtw89_glue_awdl_rx_sample_start(static_cast<const uint8_t *>(peer->getBytesNoCopy()));
+    } else if (command->isEqualTo("awdl-rx-sample-stop")) {
+        rtw89_glue_awdl_rx_sample_stop();
+#endif
     } else if (command->isEqualTo("up")) {
         LOG("radio up");
         ret = radioUp();
@@ -850,11 +864,11 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
  * comes back up (firmware download included) after. The network is not
  * joined again here; macOS does that itself once the radio is back.
  */
-IOReturn AirPort_RTW89::powerEvent(void *target, void *refCon, UInt32 messageType,
+IOReturn RTLAirLink::powerEvent(void *target, void *refCon, UInt32 messageType,
                                    IOService *provider, void *messageArgument,
                                    vm_size_t argSize)
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(target);
+    RTLAirLink *me = static_cast<RTLAirLink *>(target);
 
     if (messageType == kIOMessageSystemWillSleep) {
         me->sleepRadio();
@@ -876,7 +890,7 @@ IOReturn AirPort_RTW89::powerEvent(void *target, void *refCon, UInt32 messageTyp
     return kIOReturnSuccess;
 }
 
-void AirPort_RTW89::sleepRadio()
+void RTLAirLink::sleepRadio()
 {
     IOLockLock(_commandLock);
     /* from here on a request from macOS cannot bring the radio up */
@@ -890,7 +904,7 @@ void AirPort_RTW89::sleepRadio()
     LOG("going to sleep: radio %s", _upBeforeSleep ? "off" : "was already off");
 }
 
-void AirPort_RTW89::wakeRadio()
+void RTLAirLink::wakeRadio()
 {
     uint64_t start, end;
     int ret = 0;
@@ -914,7 +928,7 @@ void AirPort_RTW89::wakeRadio()
         nativePowerChanged();
 }
 
-void AirPort_RTW89::teardown()
+void RTLAirLink::teardown()
 {
     if (_powerNotifier) {
         _powerNotifier->remove();
@@ -979,14 +993,14 @@ void AirPort_RTW89::teardown()
     _linkActive = false;
 }
 
-void AirPort_RTW89::stop(IOService *provider)
+void RTLAirLink::stop(IOService *provider)
 {
     LOG("stopping");
     teardown();
     super::stop(provider);
 }
 
-void AirPort_RTW89::free()
+void RTLAirLink::free()
 {
     teardown();
     rtw89_logring_free();

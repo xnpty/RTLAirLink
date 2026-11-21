@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/* RTLAirLink integration and release changes dated 2026-11-21. */
 /* Copyright(c) 2019-2020  Realtek Corporation
  */
 
@@ -2678,24 +2679,19 @@ static int rtw89_mac_typ_fltr_opt_ax(struct rtw89_dev *rtwdev,
 static u32 rtw89_mac_awdl_rx_fltr(struct rtw89_dev *rtwdev, u8 mac_idx, u32 rx_fltr)
 {
 #if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
-	/* Follow rtw89's active OTHER_BSS policy (Ikromov, v5 3/10).
-	 * Relax admission while keeping the station and AWDL ports active.
-	 * The sniffer bit controls passive receive and can suppress Auto-ACK.
+	/* Active AWDL shares this CMAC with the infrastructure station.
+	 * Realtek gates broadcast and multicast separately. Enable
+	 * both group classes while AWDL is active. The software RX
+	 * path checks the AWDL BSSID, observed peer and IPv6 destination.
 	 */
 	if (mac_idx == RTW89_MAC_0 && rtwdev->chip->chip_id == RTL8852B &&
-	    rtwdev->hal.owly_awdl_scc_rx)
-		rx_fltr &= ~(B_AX_A_A1_MATCH | B_AX_A_BC | B_AX_A_MC |
+	    rtwdev->hal.owly_awdl_scc_rx) {
+		rx_fltr &= ~(B_AX_A_A1_MATCH |
 			     B_AX_A_UC_CAM_MATCH | B_AX_A_BC_CAM_MATCH |
 			     B_AX_A_MC_LIST_CAM_MATCH | B_AX_A_BCN_CHK_EN |
 			     B_AX_UID_FILTER_MASK);
-	/* A1 admission keeps frames addressed to our real receiver identity.
-	 * Do not reinstate the unicast CAM drop: AWDL No-DS frames are outside
-	 * the AP association, even with an allocated peer CAM/MACID. The stock
-	 * rtw89_roc_start() also clears UC/BC CAM drops on its active receiver.
-	 * Scans retain their broad probe-response policy. No sniffer mode. */
-	if (mac_idx == RTW89_MAC_0 && rtwdev->chip->chip_id == RTL8852B &&
-	    rtwdev->hal.owly_awdl_scc_rx && !rtwdev->scanning)
-		rx_fltr |= B_AX_A_A1_MATCH;
+		rx_fltr |= B_AX_A_BC | B_AX_A_MC;
+	}
 #endif
 	return rx_fltr;
 }

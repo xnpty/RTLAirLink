@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 #include <Headers/plugin_start.hpp>
 #include <IOKit/IOService.h>
 #include <IOKit/IOWorkLoop.h>
@@ -10,8 +11,8 @@
 
 extern bool ADDPR(startSuccess);
 
-class EXPORT OwlyAirLinkBridge : public IOService {
-    OSDeclareDefaultStructors(OwlyAirLinkBridge)
+class EXPORT RTLAirBridge : public IOService {
+    OSDeclareDefaultStructors(RTLAirBridge)
 public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
@@ -26,16 +27,16 @@ private:
     bool _ownsRuntime = false;
 };
 
-OSDefineMetaClassAndStructors(OwlyAirLinkBridge, IOService)
+OSDefineMetaClassAndStructors(RTLAirBridge, IOService)
 
-void OwlyAirLinkBridge::publish()
+void RTLAirBridge::publish()
 {
     OwlyStatus::flush(this);
     auto *resources = IOService::getResourceService();
     if (resources && resources != this) OwlyStatus::flush(resources);
 }
 
-bool OwlyAirLinkBridge::start(IOService *provider)
+bool RTLAirBridge::start(IOService *provider)
 {
     if (_attempted) return false;
     _attempted = true;
@@ -80,9 +81,9 @@ bool OwlyAirLinkBridge::start(IOService *provider)
     return true;
 }
 
-void OwlyAirLinkBridge::timerFired(OSObject *owner, IOTimerEventSource *sender)
+void RTLAirBridge::timerFired(OSObject *owner, IOTimerEventSource *sender)
 {
-    auto *self = OSDynamicCast(OwlyAirLinkBridge, owner);
+    auto *self = OSDynamicCast(RTLAirBridge, owner);
     if (!self) return;
     self->publish();
     if (self->_timer == sender && sender->setTimeoutMS(1000) != kIOReturnSuccess) {
@@ -92,7 +93,7 @@ void OwlyAirLinkBridge::timerFired(OSObject *owner, IOTimerEventSource *sender)
     }
 }
 
-void OwlyAirLinkBridge::closeResources()
+void RTLAirBridge::closeResources()
 {
     if (_ownsRuntime) {
         OwlyRuntime::deactivate();
@@ -107,7 +108,7 @@ void OwlyAirLinkBridge::closeResources()
     if (_loop) { _loop->release(); _loop = nullptr; }
 }
 
-void OwlyAirLinkBridge::stop(IOService *provider)
+void RTLAirBridge::stop(IOService *provider)
 {
     closeResources();
     OwlyStatus::flag("OwlyEB1ServiceStopped", true);
@@ -115,7 +116,7 @@ void OwlyAirLinkBridge::stop(IOService *provider)
     IOService::stop(provider);
 }
 
-void OwlyAirLinkBridge::free()
+void RTLAirBridge::free()
 {
     closeResources();
     IOService::free();

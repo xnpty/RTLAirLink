@@ -50,7 +50,7 @@ extern "C" int rtw89_glue_awdl_mi(bool automatic,const uint8_t *destination,
 }
 #endif
 constexpr unsigned RTW89_FRONT_ROLE_AIRLINK_OBSERVED=6;
-struct AirPort_RTW89 {
+struct RTLAirLink {
  struct NativeState {struct {void *cookie=nullptr;uint32_t role=6;bool enabled=false;} airlink;};
  NativeState * _ns=nullptr;
  bool _nativeClosing=false,_halting=false,_asleep=false;
@@ -61,7 +61,7 @@ struct AirPort_RTW89 {
 #include "production_methods.inc"
 int main()
 {
- AirPort_RTW89 dev; AirPort_RTW89::NativeState ns;int cookie=0,other=0;
+ RTLAirLink dev; RTLAirLink::NativeState ns;int cookie=0,other=0;
  ns.airlink.cookie=&cookie;dev._ns=&ns;
  apple80211_awdl_sync_enabled status={};
 #ifdef OWLY_TEST_BASELINE

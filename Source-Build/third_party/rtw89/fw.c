@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/* RTLAirLink integration and release changes dated 2026-11-21. */
 /* Copyright(c) 2019-2020  Realtek Corporation
  */
 
@@ -10457,6 +10458,15 @@ static int rtw89_hw_scan_complete_cb(struct rtw89_dev *rtwdev, void *data)
 	rtw89_mac_set_rx_fltr(rtwdev, rtwvif_link->mac_idx, rtwdev->hal.rx_fltr);
 
 	rtw89_core_scan_complete(rtwdev, rtwvif_link, true);
+#if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+	/* Apply the active AWDL receive policy after core completion
+	 * clears scanning and before traffic resumes.
+	 */
+	if (rtwvif_link->mac_idx == RTW89_MAC_0 &&
+	    rtwdev->chip->chip_id == RTL8852B && rtwdev->hal.owly_awdl_scc_rx)
+		rtw89_mac_set_rx_fltr(rtwdev, rtwvif_link->mac_idx,
+				      rtwdev->hal.rx_fltr);
+#endif
 	ieee80211_scan_completed(rtwdev->hw, &info);
 	ieee80211_wake_queues(rtwdev->hw);
 	rtw89_mac_port_cfg_rx_sync(rtwdev, rtwvif_link, true);

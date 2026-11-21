@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 /*
  * The seam between the two kexts of the native Wi-Fi driver.
  *
- * The front (AirPortRTW89Front) is the IO80211Controller macOS sees. It links
+ * The front (RTLAirLinkFront) is the IO80211Controller macOS sees. It links
  * against IO80211FamilyLegacy, which OpenCore injects, so it has to be
  * injected as well and only changes with a restart. It knows nothing about
  * the chip and decides nothing: every request is passed to the back.
@@ -31,14 +32,11 @@
 #include "owly_abi6_packet.h"
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
 #include "owly_native_link.h"
-#define RTW89_FRONT_API_VERSION 7
-#else
-#define RTW89_FRONT_API_VERSION 6
 #endif
-#else
-#define RTW89_FRONT_API_VERSION 5
 #endif
-#define RTW89_FRONT_CLASS       "AirPortRTW89Front"
+/* 10: RTLAirLink's native AWDL bridge on top of 9 (the front's log line). */
+#define RTW89_FRONT_API_VERSION 10
+#define RTW89_FRONT_CLASS       "RTLAirLinkFront"
 /* callPlatformFunction(name, true, back ops, front ops out, 0, 0) */
 #define RTW89_FRONT_CONNECT     "RTW89FrontConnect"
 #define RTW89_FRONT_DISCONNECT  "RTW89FrontDisconnect"
@@ -176,6 +174,18 @@ struct rtw89_back_ops {
     uint32_t (*output)(void *ctx, mbuf_t m);
     /* The system goes to sleep (false) or has woken (true). */
     void (*power)(void *ctx, bool on);
+    /*
+     * One already-formatted line for the driver's log ring, the one
+     * `rtlairlinkctl log` reads.
+     *
+     * The front's own IOLog goes nowhere. Loaded from the EFI it does not
+     * reach the unified log, and the kernel message buffer is too small to
+     * hold it -- an hour of running produced not one front line anywhere,
+     * the one written at probe included. That is why the driver has a ring
+     * at all (src/kext/rtw89_logring.cpp); the front borrows it, so that
+     * both halves of one event can be read in one place and in order.
+     */
+    void (*log)(void *ctx, const char *line);
     /* OWLY_NATIVE_IDENTITY_BRIDGE_BEGIN: ABI v4: acknowledged AirLink VIF lifecycle. */
     bool (*vif_event)(void *ctx, void *vif_identity, uint32_t role, uint32_t event,
                       const uint8_t request_mac[6]); /* non-NULL only for CREATED */

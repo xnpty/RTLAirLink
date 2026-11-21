@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 /*
- * AirPort_RTW89: the IOKit side of the driver.
+ * RTLAirLink: the IOKit side of the driver.
  *
  * Current scope: match the RTL8852BE, hand the platform services (config
  * space, BAR 2, DMA memory, the interrupt) to the Linux side through
  * rtw89_glue.h and let the driver's own probe() bring the chip up once. The
  * radio is started, a scan run and a network joined on request (setProperties,
- * used by tools/rtw89ctl).
+ * used by tools/rtlairlinkctl).
  *
  * To the rest of macOS the card is an Ethernet controller: it publishes an
  * IOEthernetInterface (enX) whose link comes up once a network is joined and
@@ -34,10 +35,8 @@
 #include "owly_abi6_rx_gate.h"
 #endif
 
-struct apple80211req;
-
-class AirPort_RTW89 : public IOEthernetController {
-    OSDeclareDefaultStructors(AirPort_RTW89)
+class RTLAirLink : public IOEthernetController {
+    OSDeclareDefaultStructors(RTLAirLink)
 
 public:
     bool start(IOService *provider) override;
@@ -77,7 +76,7 @@ private:
     void publishLink();
     void teardown();
 
-    /* rtw89_glue_platform callbacks; ctx is the AirPort_RTW89 instance. */
+    /* rtw89_glue_platform callbacks; ctx is the RTLAirLink instance. */
     static uint32_t cfgRead(void *ctx, unsigned int offset, unsigned int width);
     static void cfgWrite(void *ctx, unsigned int offset, unsigned int width,
                          uint32_t value);
@@ -89,7 +88,7 @@ private:
     static void txWake(void *ctx);
     bool transmit(mbuf_t m);
 
-    /* Native Wi-Fi (AirPortRTW89Native.cpp): connected to AirPortRTW89Front
+    /* Native Wi-Fi (RTLAirLinkNative.cpp): connected to RTLAirLinkFront
      * instead of publishing an Ethernet interface. */
     struct NativeState;
     bool connectFront();
@@ -109,10 +108,13 @@ private:
     bool nativeAwdlGetEnvelope(void *interface, void *vif, unsigned long cmd,
                                void *data, int *result);
     int nativeAssociate(void *data);
-    bool nativeJoinEnvelope(struct apple80211req *req, int *result);
+    int nativeScanHostPayload(unsigned int number, const void *payload, uint32_t length,
+                              const char *entry);
+    bool joinAfterScan(const uint8_t *ssid, uint32_t ssidLen);
     static void scanDone(void *ctx, bool aborted);
     static void backGetMac(void *ctx, uint8_t mac[6]);
     static int backSetMac(void *ctx, const uint8_t mac[6]);
+    static void backLog(void *ctx, const char *line);
     static int backRequest(void *ctx, unsigned int type, int number, void *interface, void *data);
     static int backIoctl(void *ctx, void *interface, void *vif, void *ifnet, unsigned long cmd,
                          void *data, bool *handled);

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 /* Gate14 RC3: default fail-closed. Native VIF must be explicitly armed via
  * both Makefile switches. Set these before the class header is parsed. */
 #ifndef OWLY_GATE14_REAL_VIF
@@ -16,7 +17,8 @@
 #if OWLY_ABI6_NATIVE_P2P_FACTORY && !OWLY_GATE14_REAL_VIF
 #error "ABI6 P2P subclass must only run with Gate14 armed"
 #endif
-#include "AirPortRTW89Front.hpp"
+#include "../rtw89_release.h"
+#include "RTLAirLinkFront.hpp"
 #if defined(OWLY_AWDL_SERVICE_LIFECYCLE) && OWLY_AWDL_SERVICE_LIFECYCLE
 #include "../kext/OwlyAwdlEntitlement.hpp"
 #include <mach/task.h>
@@ -30,8 +32,11 @@
 #endif
 #include "../kext/rtw89_chips.h"
 
+#include <IOKit/80211/apple80211_var.h>
+
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOLib.h>
+#include <libkern/version.h>
 #include <IOKit/network/IOBasicOutputQueue.h>
 #include <IOKit/network/IONetworkMedium.h>
 #include <sys/errno.h>
@@ -40,7 +45,14 @@
 #include "rtw89_awdl_action_decode.h"
 #endif
 
-#define LOG(fmt, ...) IOLog("AirPortRTW89Front: " fmt "\n", ##__VA_ARGS__)
+/*
+ * Every front line goes to the driver's log ring, because the front's own
+ * IOLog reaches nothing: not the unified log, not dmesg for longer than a
+ * few seconds. Before the driver connects there is nowhere to put a line but
+ * IOLog, so that is still the fallback, and those early lines are the ones
+ * that may well be lost.
+ */
+#define LOG(fmt, ...) rtw89FrontLog("RTLAirLinkFront: " fmt, ##__VA_ARGS__)
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
 #include "OwlyNativeP2P.inc"
 #endif
@@ -204,12 +216,32 @@ static IOPMPowerState gPowerStates[kPowerStateCount] = {
 /*  The interface                                                       */
 /* ------------------------------------------------------------------ */
 
-OSDefineMetaClassAndStructors(AirPortRTW89FrontInterface, IO80211Interface)
+OSDefineMetaClassAndStructors(RTLAirLinkFrontInterface, IO80211Interface)
 
 /* One card, one front: set through rtw89_front_ops.set_apple_rsn(). */
 static volatile bool gAppleRsn;
 
-UInt32 AirPortRTW89FrontInterface::inputPacket(mbuf_t packet, UInt32 length, IOOptionBits options,
+/* The front whose back takes the log lines; see LOG above. */
+static RTLAirLinkFront *gLogFront;
+
+static void rtw89FrontLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+static void rtw89FrontLog(const char *fmt, ...)
+{
+    RTLAirLinkFront *front = gLogFront;
+    char line[512];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    if (front && front->logLine(line))
+        return;
+    IOLog("%s\n", line);
+}
+
+UInt32 RTLAirLinkFrontInterface::inputPacket(mbuf_t packet, UInt32 length, IOOptionBits options,
                                                void *param)
 {
     if (gAppleRsn && packet && mbuf_len(packet) >= 14) {
@@ -227,23 +259,23 @@ UInt32 AirPortRTW89FrontInterface::inputPacket(mbuf_t packet, UInt32 length, IOO
 /* ------------------------------------------------------------------ */
 
 #define super IO80211Controller
-OSDefineMetaClassAndStructors(AirPortRTW89Front, IO80211Controller)
+OSDefineMetaClassAndStructors(RTLAirLinkFront, IO80211Controller)
 
 /* IONetworkController::start() asks for this before our start() goes on. An
  * IO80211WorkLoop keeps the family's requests and our own calls on one loop. */
-bool AirPortRTW89Front::createWorkLoop()
+bool RTLAirLinkFront::createWorkLoop()
 {
     if (!_workLoop)
         _workLoop = IO80211WorkLoop::workLoop();
     return _workLoop != nullptr;
 }
 
-IOWorkLoop *AirPortRTW89Front::getWorkLoop() const
+IOWorkLoop *RTLAirLinkFront::getWorkLoop() const
 {
     return _workLoop;
 }
 
-bool AirPortRTW89Front::start(IOService *provider)
+bool RTLAirLinkFront::start(IOService *provider)
 {
     _pci = OSDynamicCast(IOPCIDevice, provider);
     if (!_pci)
@@ -374,7 +406,7 @@ bool AirPortRTW89Front::start(IOService *provider)
  * identity callbacks and stop-side VIF cleanup share IO80211's workloop gate.
  * The gate is recursive: a backend callback can reenter stop() on the same
  * thread. Defer that nested stop until the enclosing operation finishes. */
-void AirPortRTW89Front::stop(IOService *provider)
+void RTLAirLinkFront::stop(IOService *provider)
 {
 #if defined(OWLY_ABI6_FRONT_BRIDGE) && OWLY_ABI6_FRONT_BRIDGE
     /* Shutdown admission before Apple starts detaching its P2P object.
@@ -415,7 +447,7 @@ void AirPortRTW89Front::stop(IOService *provider)
         if (_workLoop) {
             const IOReturn rc = _workLoop->runAction(
                 [](OSObject *owner, void *, void *, void *, void *) -> IOReturn {
-                    AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(owner);
+                    RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(owner);
                     self->owlyStopVifOnGate();
                     return kIOReturnSuccess;
                 }, this);
@@ -444,7 +476,7 @@ void AirPortRTW89Front::stop(IOService *provider)
 }
 
 #if defined(RTW89_AWDL_NATIVE_FRONT_OBSERVE) && RTW89_AWDL_NATIVE_FRONT_OBSERVE
-void AirPortRTW89Front::owlyStopVifOnGate()
+void RTLAirLinkFront::owlyStopVifOnGate()
 {
     /* Only called with the workloop gate held. Requests cannot run in
      * parallel; reentrant stop was deferred before entering this routine. */
@@ -485,7 +517,7 @@ void AirPortRTW89Front::owlyStopVifOnGate()
     if (!detached) LOG("OWLY M2.2: stop-side detach failed; VIF still Apple-owned");
 }
 
-void AirPortRTW89Front::owlyFinishDeferredStop()
+void RTLAirLinkFront::owlyFinishDeferredStop()
 {
     if (!_owlyVifLock) return;
     IOService *provider = nullptr;
@@ -504,7 +536,7 @@ void AirPortRTW89Front::owlyFinishDeferredStop()
 }
 #endif
 
-void AirPortRTW89Front::free()
+void RTLAirLinkFront::free()
 {
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     owlyNativeStop();
@@ -534,12 +566,12 @@ void AirPortRTW89Front::free()
     super::free();
 }
 
-IOReturn AirPortRTW89Front::registerWithPolicyMaker(IOService *policyMaker)
+IOReturn RTLAirLinkFront::registerWithPolicyMaker(IOService *policyMaker)
 {
     return policyMaker->registerPowerDriver(this, gPowerStates, kPowerStateCount);
 }
 
-IOReturn AirPortRTW89Front::setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice)
+IOReturn RTLAirLinkFront::setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice)
 {
     const bool there = backEnter();
     if (there && _back.power)
@@ -559,18 +591,49 @@ IOReturn AirPortRTW89Front::setPowerState(unsigned long powerStateOrdinal, IOSer
  * lock would never be granted. Counting instead, the call that comes in
  * during a disconnect is told nobody is there, and the outer one returns.
  */
-bool AirPortRTW89Front::backEnter()
+bool RTLAirLinkFront::backEnter()
 {
     OSIncrementAtomic(&_backCalls);
     return _connected;
 }
 
-void AirPortRTW89Front::backLeave()
+void RTLAirLinkFront::backLeave()
 {
     OSDecrementAtomic(&_backCalls);
 }
 
-IOReturn AirPortRTW89Front::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction,
+/*
+ * The family's AWDL state every five seconds, as properties, and the link put
+ * back up when it is found down.
+ *
+ * IO80211AWDLPeerManager::updateLocalRequests() is where wifip2pd's service
+ * records (AirDrop's SRV and TXT among them) arrive, and it drops each one
+ * with "Received service request but link is down" while the interface's
+ * link state at 0xfc is not 2, or "but not configured" while bit 1 of the
+ * peer manager's state flags at 0x8528 is clear. Past those two checks it
+ * rebuilds the sync frame template with the records in it and hands it to
+ * us. On 2026-11-11 no new template ever arrived while AirDrop advertised,
+ * awdl0 read "status: inactive", and our own log has seen 0xfc read back 1
+ * after we set it up. The driver's log ring is too small to keep these
+ * readings, hence the registry. Offsets are IO80211FamilyLegacy's, as
+ * elsewhere in this file; everything here only reads them, except the
+ * setLinkState() call, which is the one awdlEnableThread() already makes.
+ */
+
+bool RTLAirLinkFront::logLine(const char *line)
+{
+    bool done = false;
+
+    const bool there = backEnter();
+    if (there && _back.log) {
+        _back.log(_back.ctx, line);
+        done = true;
+    }
+    backLeave();
+    return done;
+}
+
+IOReturn RTLAirLinkFront::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction,
                                                  void *param1, void *param2, void *param3,
                                                  void *param4)
 {
@@ -583,7 +646,7 @@ IOReturn AirPortRTW89Front::callPlatformFunction(const OSSymbol *functionName, b
                                        param4);
 }
 
-bool AirPortRTW89Front::publishMedium()
+bool RTLAirLinkFront::publishMedium()
 {
     OSDictionary *dict = OSDictionary::withCapacity(1);
     IONetworkMedium *medium = IONetworkMedium::medium(kIOMediumIEEE80211Auto, 11000000);
@@ -598,7 +661,7 @@ bool AirPortRTW89Front::publishMedium()
     return ok;
 }
 
-IOReturn AirPortRTW89Front::connectBack(const struct rtw89_back_ops *back,
+IOReturn RTLAirLinkFront::connectBack(const struct rtw89_back_ops *back,
                                         struct rtw89_front_ops *front)
 {
     if (!back || !front || back->version != RTW89_FRONT_API_VERSION || !back->get_mac ||
@@ -645,13 +708,14 @@ IOReturn AirPortRTW89Front::connectBack(const struct rtw89_back_ops *back,
     front->owly_rx_handoff = opOwlyRxHandoff;
 #endif
 
+    gLogFront = this;
     setProperty("RTW89 Back Connected", kOSBooleanTrue);
     LOG("driver connected, address %02x:%02x:%02x:%02x:%02x:%02x", _mac.bytes[0], _mac.bytes[1],
         _mac.bytes[2], _mac.bytes[3], _mac.bytes[4], _mac.bytes[5]);
     return kIOReturnSuccess;
 }
 
-IOReturn AirPortRTW89Front::disconnectBack()
+IOReturn RTLAirLinkFront::disconnectBack()
 {
     bool was;
 
@@ -680,14 +744,16 @@ IOReturn AirPortRTW89Front::disconnectBack()
     IOLockUnlock(_backLock);
 
     if (was) {
+        /* the last line that can still reach the ring */
+        LOG("driver disconnected");
 #if defined(OWLY_ABI6_FRONT_BRIDGE) && OWLY_ABI6_FRONT_BRIDGE
         setProperty("OWLY C2 native_vif_ready", 0ULL, 32);
 #endif
         setProperty("RTW89 Back Connected", kOSBooleanFalse);
         if (_netif)
             opSetLink(this, false, 0, 0);
-        LOG("driver disconnected");
     }
+    gLogFront = nullptr;
     return kIOReturnSuccess;
 }
 
@@ -695,17 +761,17 @@ IOReturn AirPortRTW89Front::disconnectBack()
 /*  For the driver: rtw89_front_ops                                     */
 /* ------------------------------------------------------------------ */
 
-void AirPortRTW89Front::opPostMessage(void *ctx, unsigned int msg, void *data, size_t len)
+void RTLAirLinkFront::opPostMessage(void *ctx, unsigned int msg, void *data, size_t len)
 {
-    AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(ctx);
+    RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(ctx);
 
     if (self->_netif)
         self->_netif->postMessage(msg, data, len);
 }
 
-void AirPortRTW89Front::opSetLink(void *ctx, bool up, uint64_t bps, unsigned int reason)
+void RTLAirLinkFront::opSetLink(void *ctx, bool up, uint64_t bps, unsigned int reason)
 {
-    AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(ctx);
+    RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(ctx);
     IOCommandGate *gate = self->getCommandGate();
 
     self->IO80211Controller::setLinkStatus(up ? (kIONetworkLinkValid | kIONetworkLinkActive) :
@@ -715,7 +781,7 @@ void AirPortRTW89Front::opSetLink(void *ctx, bool up, uint64_t bps, unsigned int
         return;
     /* IO80211's own idea of the link, under its gate as AirportItlwm does */
     gate->runAction([](OSObject *owner, void *linkUp, void *why, void *, void *) -> IOReturn {
-        AirPortRTW89Front *me = static_cast<AirPortRTW89Front *>(owner);
+        RTLAirLinkFront *me = static_cast<RTLAirLinkFront *>(owner);
 
         if (!me->_netif)
             return kIOReturnNotReady;
@@ -727,24 +793,24 @@ void AirPortRTW89Front::opSetLink(void *ctx, bool up, uint64_t bps, unsigned int
     }, (void *)(uintptr_t)up, (void *)(uintptr_t)(up ? 0 : reason));
 }
 
-void AirPortRTW89Front::opSetAppleRsn(void *ctx, bool on)
+void RTLAirLinkFront::opSetAppleRsn(void *ctx, bool on)
 {
     gAppleRsn = on;
 }
 
-bool AirPortRTW89Front::useAppleRSNSupplicant(IO80211Interface *interface)
+bool RTLAirLinkFront::useAppleRSNSupplicant(IO80211Interface *interface)
 {
     return gAppleRsn;
 }
 
-mbuf_t AirPortRTW89Front::opAllocPacket(void *ctx, unsigned int len)
+mbuf_t RTLAirLinkFront::opAllocPacket(void *ctx, unsigned int len)
 {
-    return static_cast<AirPortRTW89Front *>(ctx)->allocatePacket(len);
+    return static_cast<RTLAirLinkFront *>(ctx)->allocatePacket(len);
 }
 
-void AirPortRTW89Front::opInputPacket(void *ctx, mbuf_t m)
+void RTLAirLinkFront::opInputPacket(void *ctx, mbuf_t m)
 {
-    AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(ctx);
+    RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(ctx);
 
     if (!self->_netif) {
         mbuf_freem(m);
@@ -754,9 +820,9 @@ void AirPortRTW89Front::opInputPacket(void *ctx, mbuf_t m)
 }
 
 #if defined(OWLY_ABI6_FRONT_BRIDGE) && OWLY_ABI6_FRONT_BRIDGE
-bool AirPortRTW89Front::opOwlyRxHandoff(void *ctx, const struct owly_abi6_packet *pkt)
+bool RTLAirLinkFront::opOwlyRxHandoff(void *ctx, const struct owly_abi6_packet *pkt)
 {
-    AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(ctx);
+    RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(ctx);
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     if(self && pkt && pkt->kind!=OWLY_ABI6_PACKET_C3_SCAN_SIGNATURE)
         return self->owlyNativeReceive(pkt);
@@ -807,9 +873,9 @@ bool AirPortRTW89Front::opOwlyRxHandoff(void *ctx, const struct owly_abi6_packet
 }
 #endif
 
-void AirPortRTW89Front::opTxWake(void *ctx)
+void RTLAirLinkFront::opTxWake(void *ctx)
 {
-    IOOutputQueue *queue = static_cast<AirPortRTW89Front *>(ctx)->getOutputQueue();
+    IOOutputQueue *queue = static_cast<RTLAirLinkFront *>(ctx)->getOutputQueue();
 
     if (queue)
         queue->service(IOBasicOutputQueue::kServiceAsync);
@@ -821,7 +887,7 @@ void AirPortRTW89Front::opTxWake(void *ctx)
  * local already parsed by the backend. Embedded userspace data is NEVER read
  * here; Apple's original handler retains all copyIn/validation/copyOut work.
  * This is not used for the ambiguous split ioctl_set callback. */
-bool AirPortRTW89Front::owlyServiceIoctl(IO80211Interface *interface,
+bool RTLAirLinkFront::owlyServiceIoctl(IO80211Interface *interface,
     IO80211VirtualInterface *vif, ifnet_t net, unsigned long command,
     void *envelope, int *result)
 {
@@ -848,7 +914,7 @@ bool AirPortRTW89Front::owlyServiceIoctl(IO80211Interface *interface,
     OwlyServiceCall call = {interface, vif, net, command, envelope, ENXIO};
     const IOReturn rc = loop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
-            auto *self = static_cast<AirPortRTW89Front *>(owner);
+            auto *self = static_cast<RTLAirLinkFront *>(owner);
             auto *args = static_cast<OwlyServiceCall *>(opaque);
             args->result = self->owlyServiceIoctlOnGate(args);
             return kIOReturnSuccess;
@@ -860,7 +926,7 @@ bool AirPortRTW89Front::owlyServiceIoctl(IO80211Interface *interface,
     return true;
 }
 
-int AirPortRTW89Front::owlyServiceIoctlOnGate(OwlyServiceCall *call)
+int RTLAirLinkFront::owlyServiceIoctlOnGate(OwlyServiceCall *call)
 {
     if (!call || !_owlyVifLock || !_workLoop || !_workLoop->inGate()) return ENXIO;
     IOLockLock(_owlyVifLock);
@@ -918,10 +984,10 @@ int AirPortRTW89Front::owlyServiceIoctlOnGate(OwlyServiceCall *call)
 }
 #endif
 
-int AirPortRTW89Front::opSuperIoctl(void *ctx, void *interface, void *vif, void *ifnet,
+int RTLAirLinkFront::opSuperIoctl(void *ctx, void *interface, void *vif, void *ifnet,
                                     unsigned long cmd, void *data)
 {
-    AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(ctx);
+    RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(ctx);
     owlyGate12FHit(self, "OWLY Gate12F super_ioctl", &gOwlyFSuperIOCTL);
 
 #if defined(OWLY_AWDL_SERVICE_LIFECYCLE) && OWLY_AWDL_SERVICE_LIFECYCLE
@@ -939,10 +1005,10 @@ int AirPortRTW89Front::opSuperIoctl(void *ctx, void *interface, void *vif, void 
     return result;
 }
 
-int AirPortRTW89Front::opSuperIoctlSet(void *ctx, void *interface, void *vif, void *skywalk,
+int RTLAirLinkFront::opSuperIoctlSet(void *ctx, void *interface, void *vif, void *skywalk,
                                        void *data)
 {
-    AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(ctx);
+    RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(ctx);
     owlyGate12FHit(self, "OWLY Gate12F super_ioctl_set", &gOwlyFSuperSet);
 
     const int result = self->IO80211Controller::apple80211_ioctl_set(
@@ -957,7 +1023,7 @@ int AirPortRTW89Front::opSuperIoctlSet(void *ctx, void *interface, void *vif, vo
 /*  From the family: passed on                                          */
 /* ------------------------------------------------------------------ */
 
-SInt32 AirPortRTW89Front::apple80211_ioctl(IO80211Interface *interface, IO80211VirtualInterface *vif,
+SInt32 RTLAirLinkFront::apple80211_ioctl(IO80211Interface *interface, IO80211VirtualInterface *vif,
                                            ifnet_t net, unsigned long cmd, void *data)
 {
     owlyGate12FHit(this, "OWLY Gate12F ioctl_any", &gOwlyFIOCTLAny);
@@ -1008,7 +1074,7 @@ SInt32 AirPortRTW89Front::apple80211_ioctl(IO80211Interface *interface, IO80211V
     return result;
 }
 
-SInt32 AirPortRTW89Front::apple80211_ioctl_set(IO80211Interface *interface,
+SInt32 RTLAirLinkFront::apple80211_ioctl_set(IO80211Interface *interface,
                                                IO80211VirtualInterface *vif,
                                                IO80211SkywalkInterface *skywalk, void *data)
 {
@@ -1076,7 +1142,7 @@ static_assert(sizeof(OwlyM2DeleteRequest) == 20, "IOCTL95 layout changed");
  * is a userspace address: use the kernel copyin/copyout functions.
  * No fabricated awdl0, no fake success, no AWDL RF TX/RX. */
 #if 0 /* Gate14: never compile the old userspace envelope bridge */
-SInt32 AirPortRTW89Front::owlyBridgeVifSetEnvelope(IO80211Interface *interface,
+SInt32 RTLAirLinkFront::owlyBridgeVifSetEnvelope(IO80211Interface *interface,
     IO80211VirtualInterface *vif, void *data, bool *handled)
 {
     if (!handled) return EINVAL;
@@ -1158,7 +1224,7 @@ static bool owlyGate14CopyBSDName(IO80211VirtualInterface *vif, char out[16])
     return true;
 }
 
-SInt32 AirPortRTW89Front::owlyRequestAWDLCreate(unsigned int type, void *data)
+SInt32 RTLAirLinkFront::owlyRequestAWDLCreate(unsigned int type, void *data)
 {
     if (type != SIOCSA80211 || !data || !_owlyVifLock)
         return kIOReturnBadArgument;
@@ -1342,7 +1408,7 @@ SInt32 AirPortRTW89Front::owlyRequestAWDLCreate(unsigned int type, void *data)
     return kIOReturnSuccess;
 }
 
-SInt32 AirPortRTW89Front::owlyRequestAWDLDelete(unsigned int type, void *data)
+SInt32 RTLAirLinkFront::owlyRequestAWDLDelete(unsigned int type, void *data)
 {
     if (type != SIOCSA80211 || !data || !_owlyVifLock)
         return kIOReturnBadArgument;
@@ -1420,7 +1486,7 @@ SInt32 AirPortRTW89Front::owlyRequestAWDLDelete(unsigned int type, void *data)
  * Bridge only the GET(12) capabilities query to the already-working STA
  * nativeRequest() implementation. Never invent AWDL capabilities or ACK
  * any AWDL TX/RX/configuration request. The caller owns the kernel buffer. */
-SInt32 AirPortRTW89Front::apple80211VirtualRequest(UInt type, int number,
+SInt32 RTLAirLinkFront::apple80211VirtualRequest(UInt type, int number,
                                                     IO80211VirtualInterface *vif, void *data)
 {
 #if OWLY_GATE14_REAL_VIF
@@ -1508,7 +1574,56 @@ SInt32 AirPortRTW89Front::apple80211VirtualRequest(UInt type, int number,
     return super::apple80211VirtualRequest(type, number, vif, data);
 }
 
-SInt32 AirPortRTW89Front::apple80211Request(unsigned int type, int number,
+/* The legacy family has separate virtual slots for Skywalk. Its two-argument
+ * SET wrapper jumps straight to its own parser, bypassing our legacy-interface
+ * override. Bridge only scans addressed to this station; preserve all other
+ * Skywalk requests on the original family path. */
+static bool stationScan(IO80211Interface *interface, const void *data)
+{
+    if (version_major < 23 || !interface || !data)
+        return false;
+    const auto *req = static_cast<const apple80211req *>(data);
+    if (req->req_type != APPLE80211_IOC_SCAN_REQ &&
+        req->req_type != APPLE80211_IOC_SCAN_REQ_MULTIPLE)
+        return false;
+    char name[IFNAMSIZ] = {};
+    const char *prefix = interface->getNamePrefix();
+    if (!prefix)
+        return false;
+    snprintf(name, sizeof(name), "%s%u", prefix, interface->getUnitNumber());
+    return !strncmp(name, req->req_if_name, sizeof(name));
+}
+
+SInt32 RTLAirLinkFront::apple80211_ioctl(IO80211SkywalkInterface *skywalk,
+                                           unsigned long cmd, void *data)
+{
+    if (cmd == SIOCSA80211 || cmd == 0x802869c8UL) {
+        bool handled = false;
+        SInt32 ret = 0;
+        const bool there = backEnter();
+        if (there && stationScan(_netif, data) && _back.ioctl)
+            ret = _back.ioctl(_back.ctx, _netif, nullptr, nullptr, cmd, data, &handled);
+        backLeave();
+        if (handled && ret != EFAULT)
+            return ret;
+    }
+    return super::apple80211_ioctl(skywalk, cmd, data);
+}
+
+SInt32 RTLAirLinkFront::apple80211_ioctl_set(IO80211SkywalkInterface *skywalk, void *data)
+{
+    bool handled = false;
+    SInt32 ret = 0;
+    const bool there = backEnter();
+    if (there && stationScan(_netif, data) && _back.ioctl_set)
+        ret = _back.ioctl_set(_back.ctx, _netif, nullptr, skywalk, data, &handled);
+    backLeave();
+    if (handled && ret != EFAULT)
+        return ret;
+    return super::apple80211_ioctl_set(skywalk, data);
+}
+
+SInt32 RTLAirLinkFront::apple80211Request(unsigned int type, int number,
                                             IO80211Interface *interface, void *data)
 {
     owlyGate12FHit(this, "OWLY Gate12F request_any", &gOwlyFRequestAny);
@@ -1605,7 +1720,7 @@ SInt32 AirPortRTW89Front::apple80211Request(unsigned int type, int number,
         loop->retain();
         const IOReturn rc = loop->runAction(
             [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
-                AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(owner);
+                RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(owner);
                 RequestCall *args = static_cast<RequestCall *>(opaque);
                 args->result = args->number == APPLE80211_IOC_VIRTUAL_IF_CREATE ?
                     self->owlyRequestAWDLCreate(args->type, args->data) :
@@ -1634,7 +1749,7 @@ SInt32 AirPortRTW89Front::apple80211Request(unsigned int type, int number,
     return ret;
 }
 
-IOReturn AirPortRTW89Front::enable(IONetworkInterface *iface)
+IOReturn RTLAirLinkFront::enable(IONetworkInterface *iface)
 {
     IOReturn ret = kIOReturnSuccess;
 
@@ -1655,7 +1770,7 @@ IOReturn AirPortRTW89Front::enable(IONetworkInterface *iface)
     return ret;
 }
 
-IOReturn AirPortRTW89Front::disable(IONetworkInterface *iface)
+IOReturn RTLAirLinkFront::disable(IONetworkInterface *iface)
 {
     IOReturn ret = super::disable(iface);
 
@@ -1667,7 +1782,7 @@ IOReturn AirPortRTW89Front::disable(IONetworkInterface *iface)
     return ret;
 }
 
-UInt32 AirPortRTW89Front::outputPacket(mbuf_t m, void *param)
+UInt32 RTLAirLinkFront::outputPacket(mbuf_t m, void *param)
 {
     UInt32 ret;
 
@@ -1687,23 +1802,23 @@ UInt32 AirPortRTW89Front::outputPacket(mbuf_t m, void *param)
 /*  What a controller has to answer itself                              */
 /* ------------------------------------------------------------------ */
 
-const OSString *AirPortRTW89Front::newVendorString() const
+const OSString *RTLAirLinkFront::newVendorString() const
 {
     return OSString::withCString("Realtek");
 }
 
-const OSString *AirPortRTW89Front::newModelString() const
+const OSString *RTLAirLinkFront::newModelString() const
 {
     /* Modified 2026-11-15: display branding; retain the detected Realtek chip. */
     char model[96];
-    snprintf(model, sizeof(model), "RTLAirLink (%s)",
+    snprintf(model, sizeof(model), "RTLAirLink " RTLAIRLINK_VERSION " (%s)",
              rtw89_chip_name(_pci ? _pci->configRead16(kIOPCIConfigDeviceID) : 0));
     return OSString::withCString(model);
 }
 
-IONetworkInterface *AirPortRTW89Front::createInterface()
+IONetworkInterface *RTLAirLinkFront::createInterface()
 {
-    AirPortRTW89FrontInterface *interface = OSTypeAlloc(AirPortRTW89FrontInterface);
+    RTLAirLinkFrontInterface *interface = OSTypeAlloc(RTLAirLinkFrontInterface);
 
     if (interface && !interface->init(this)) {
         interface->release();
@@ -1721,7 +1836,7 @@ IONetworkInterface *AirPortRTW89Front::createInterface()
 #if defined(RTW89_AWDL_NATIVE_FRONT_OBSERVE) && RTW89_AWDL_NATIVE_FRONT_OBSERVE
 /* ABI4.1: This checks only our previously ACKed opaque AirLink identity.
  * Do not guess a role for other Apple virtual interfaces. */
-bool AirPortRTW89Front::owlyVifIsTracked(IO80211VirtualInterface *vif)
+bool RTLAirLinkFront::owlyVifIsTracked(IO80211VirtualInterface *vif)
 {
     if (!_owlyVifLock || !vif) return false;
     IOLockLock(_owlyVifLock);
@@ -1737,7 +1852,7 @@ bool AirPortRTW89Front::owlyVifIsTracked(IO80211VirtualInterface *vif)
  * fails closed instead of blocking. backEnter() is done BEFORE taking the
  * local lock, so disconnectBack() can drain before resetting identity.
  * Neither this path nor ABI4 supplies a Skywalk/AWDL data path. */
-bool AirPortRTW89Front::owlyVifEventOnGate(IO80211VirtualInterface *vif, UInt role, uint32_t event,
+bool RTLAirLinkFront::owlyVifEventOnGate(IO80211VirtualInterface *vif, UInt role, uint32_t event,
                                                 const uint8_t request_mac[6])
 {
     if (!_owlyVifLock || !vif) return false;
@@ -1786,7 +1901,7 @@ bool AirPortRTW89Front::owlyVifEventOnGate(IO80211VirtualInterface *vif, UInt ro
     return accepted;
 }
 
-bool AirPortRTW89Front::owlyVifEvent(IO80211VirtualInterface *vif, UInt role, uint32_t event,
+bool RTLAirLinkFront::owlyVifEvent(IO80211VirtualInterface *vif, UInt role, uint32_t event,
                                        const uint8_t request_mac[6])
 {
     if (!_workLoop) return false;
@@ -1805,7 +1920,7 @@ bool AirPortRTW89Front::owlyVifEvent(IO80211VirtualInterface *vif, UInt role, ui
      * detached object: callback uses only the opaque identity token. */
     const IOReturn rc = _workLoop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
-            AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(owner);
+            RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(owner);
             VifCall *args = static_cast<VifCall *>(opaque);
             args->result = self->owlyVifEventOnGate(args->vif, args->role, args->event,
                                                  args->has_mac ? args->mac : nullptr);
@@ -1814,7 +1929,7 @@ bool AirPortRTW89Front::owlyVifEvent(IO80211VirtualInterface *vif, UInt role, ui
     return rc == kIOReturnSuccess && call.result;
 }
 
-IO80211VirtualInterface *AirPortRTW89Front::createVirtualInterface(struct ether_addr *address,
+IO80211VirtualInterface *RTLAirLinkFront::createVirtualInterface(struct ether_addr *address,
                                                                     UInt role)
 {
     if (role == RTW89_FRONT_ROLE_AIRLINK_OBSERVED)
@@ -1885,7 +2000,7 @@ IO80211VirtualInterface *AirPortRTW89Front::createVirtualInterface(struct ether_
 
 /* Apple may enable/disable a VIF without a request95 transaction. Serialize
  * both operations with IOCTL94/95 and stop on the *same* workloop gate. */
-SInt32 AirPortRTW89Front::enableVirtualInterface(IO80211VirtualInterface *interface)
+SInt32 RTLAirLinkFront::enableVirtualInterface(IO80211VirtualInterface *interface)
 {
     if (!_workLoop || !_owlyVifLock) return kIOReturnNotReady;
     retain();
@@ -1894,7 +2009,7 @@ SInt32 AirPortRTW89Front::enableVirtualInterface(IO80211VirtualInterface *interf
     struct Args { IO80211VirtualInterface *vif; SInt32 result; } args = { interface, kIOReturnNotReady };
     const IOReturn rc = loop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
-            AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(owner);
+            RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(owner);
             Args *a = static_cast<Args *>(opaque);
             a->result = self->owlyEnableVirtualInterfaceOnGate(a->vif);
             return kIOReturnSuccess;
@@ -1905,7 +2020,7 @@ SInt32 AirPortRTW89Front::enableVirtualInterface(IO80211VirtualInterface *interf
     return rc == kIOReturnSuccess ? args.result : (SInt32)rc;
 }
 
-SInt32 AirPortRTW89Front::disableVirtualInterface(IO80211VirtualInterface *interface)
+SInt32 RTLAirLinkFront::disableVirtualInterface(IO80211VirtualInterface *interface)
 {
     if (!_workLoop || !_owlyVifLock) return kIOReturnNotReady;
     retain();
@@ -1914,7 +2029,7 @@ SInt32 AirPortRTW89Front::disableVirtualInterface(IO80211VirtualInterface *inter
     struct Args { IO80211VirtualInterface *vif; SInt32 result; } args = { interface, kIOReturnNotReady };
     const IOReturn rc = loop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
-            AirPortRTW89Front *self = static_cast<AirPortRTW89Front *>(owner);
+            RTLAirLinkFront *self = static_cast<RTLAirLinkFront *>(owner);
             Args *a = static_cast<Args *>(opaque);
             a->result = self->owlyDisableVirtualInterfaceOnGate(a->vif);
             return kIOReturnSuccess;
@@ -1925,7 +2040,7 @@ SInt32 AirPortRTW89Front::disableVirtualInterface(IO80211VirtualInterface *inter
     return rc == kIOReturnSuccess ? args.result : (SInt32)rc;
 }
 
-SInt32 AirPortRTW89Front::owlyEnableVirtualInterfaceOnGate(IO80211VirtualInterface *interface)
+SInt32 RTLAirLinkFront::owlyEnableVirtualInterfaceOnGate(IO80211VirtualInterface *interface)
 {
     IOLockLock(_owlyVifLock);
     if (_owlyAWDLStopping || _owlyVifMethodBusy) {
@@ -1952,7 +2067,7 @@ SInt32 AirPortRTW89Front::owlyEnableVirtualInterfaceOnGate(IO80211VirtualInterfa
     return ret;
 }
 
-SInt32 AirPortRTW89Front::owlyDisableVirtualInterfaceOnGate(IO80211VirtualInterface *interface)
+SInt32 RTLAirLinkFront::owlyDisableVirtualInterfaceOnGate(IO80211VirtualInterface *interface)
 {
     IOLockLock(_owlyVifLock);
     /* Apple invokes disable while detachVirtualInterface is running,
@@ -1987,7 +2102,7 @@ SInt32 AirPortRTW89Front::owlyDisableVirtualInterfaceOnGate(IO80211VirtualInterf
 /* OWLY_NATIVE_IDENTITY_BRIDGE_END */
 /* OWLY_NATIVEFRONT_VIF_OBSERVER_END */
 
-IOReturn AirPortRTW89Front::selectMedium(const IONetworkMedium *medium)
+IOReturn RTLAirLinkFront::selectMedium(const IONetworkMedium *medium)
 {
     if (!medium)
         return kIOReturnBadArgument;
@@ -1995,7 +2110,7 @@ IOReturn AirPortRTW89Front::selectMedium(const IONetworkMedium *medium)
     return kIOReturnSuccess;
 }
 
-IOReturn AirPortRTW89Front::getHardwareAddress(IOEthernetAddress *addr)
+IOReturn RTLAirLinkFront::getHardwareAddress(IOEthernetAddress *addr)
 {
     if (!addr)
         return kIOReturnBadArgument;
@@ -2003,7 +2118,7 @@ IOReturn AirPortRTW89Front::getHardwareAddress(IOEthernetAddress *addr)
     return kIOReturnSuccess;
 }
 
-IOReturn AirPortRTW89Front::setHardwareAddress(const IOEthernetAddress *addr)
+IOReturn RTLAirLinkFront::setHardwareAddress(const IOEthernetAddress *addr)
 {
     IOReturn ret = kIOReturnNotReady;
 
@@ -2019,13 +2134,13 @@ IOReturn AirPortRTW89Front::setHardwareAddress(const IOEthernetAddress *addr)
     return ret;
 }
 
-IOReturn AirPortRTW89Front::getHardwareAddressForInterface(IO80211Interface *iface,
+IOReturn RTLAirLinkFront::getHardwareAddressForInterface(IO80211Interface *iface,
                                                           IOEthernetAddress *addr)
 {
     return getHardwareAddress(addr);
 }
 
-IOReturn AirPortRTW89Front::getPacketFilters(const OSSymbol *group, UInt32 *filters) const
+IOReturn RTLAirLinkFront::getPacketFilters(const OSSymbol *group, UInt32 *filters) const
 {
     if (!group || !filters)
         return kIOReturnBadArgument;
@@ -2036,44 +2151,44 @@ IOReturn AirPortRTW89Front::getPacketFilters(const OSSymbol *group, UInt32 *filt
     return IOEthernetController::getPacketFilters(group, filters);
 }
 
-IOReturn AirPortRTW89Front::setMulticastMode(bool active)
+IOReturn RTLAirLinkFront::setMulticastMode(bool active)
 {
     return kIOReturnSuccess;    /* the chip takes all multicast frames of the network */
 }
 
-IOReturn AirPortRTW89Front::setMulticastList(IOEthernetAddress *addrs, UInt32 count)
+IOReturn RTLAirLinkFront::setMulticastList(IOEthernetAddress *addrs, UInt32 count)
 {
     return kIOReturnSuccess;
 }
 
-IOReturn AirPortRTW89Front::setPromiscuousMode(bool active)
+IOReturn RTLAirLinkFront::setPromiscuousMode(bool active)
 {
     return kIOReturnSuccess;
 }
 
-SInt32 AirPortRTW89Front::stopDMA()
+SInt32 RTLAirLinkFront::stopDMA()
 {
     /* Called at shutdown: the driver hears of it through power(false). */
     return kIOReturnSuccess;
 }
 
-UInt32 AirPortRTW89Front::hardwareOutputQueueDepth(IO80211Interface *interface)
+UInt32 RTLAirLinkFront::hardwareOutputQueueDepth(IO80211Interface *interface)
 {
     return 0;
 }
 
-SInt32 AirPortRTW89Front::performCountryCodeOperation(IO80211Interface *interface,
+SInt32 RTLAirLinkFront::performCountryCodeOperation(IO80211Interface *interface,
                                                       IO80211CountryCodeOp op)
 {
     return kIOReturnSuccess;
 }
 
-SInt32 AirPortRTW89Front::enableFeature(IO80211FeatureCode feature, void *data)
+SInt32 RTLAirLinkFront::enableFeature(IO80211FeatureCode feature, void *data)
 {
     return feature == kIO80211Feature80211n ? kIOReturnSuccess : 102;
 }
 
-SInt32 AirPortRTW89Front::monitorModeSetEnabled(IO80211Interface *interface, bool enabled,
+SInt32 RTLAirLinkFront::monitorModeSetEnabled(IO80211Interface *interface, bool enabled,
                                                 UInt32 mode)
 {
     return kIOReturnSuccess;

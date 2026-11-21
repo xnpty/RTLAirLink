@@ -1,35 +1,23 @@
 # RTLAirLink
 
-Realtek thử nghiệm RTL8852BE kext cho macOS với hỗ trợ AWDL/AirDrop tùy chỉnh (driver Wi-Fi 802.11 cơ bản được điều chỉnh từ AirPort_RTW89; Các khái niệm giao diện/trợ giúp lấy cảm hứng từ Owly).
+Driver Wi‑Fi thử nghiệm cho Realtek RTL8852BE trên macOS Tahoe Intel, có AWDL và AirDrop native.
 
-[![Ủng hộ qua Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/taingo)
+**Triển khai AWDL native do Anh Tài (xnpty) nghiên cứu, thiết kế và phát triển trong Owly/RTLAirLink.** [Ghi công và lịch sử mã nguồn](CREDITS.md)
 
-## Find me
+[![Ủng hộ qua Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/taingo) · [Discord](https://discord.com/users/856029147750858793)
 
-[Discord](https://discord.com/app) · **`_taingo`** — mở Discord, chọn **Thêm bạn**, rồi nhập `_taingo`.
+## Cài v0.2.0
 
-Hai kext được phát hành cùng nhau:
+Chạy trên macOS Tahoe Intel với OpenCore đã hoạt động và Python 3.9 trở lên.
 
-- `RTLAirLink.kext`: driver Wi-Fi, chứa frontend `AirPortRTW89Front.kext`.
-- `RTLAirBridge.kext`: cầu nối Lilu với Wi-Fi Legacy của Apple.
+~~~bash
+curl -fL --proto '=https' --proto-redir '=https' -o install-rtlairlink.sh https://github.com/xnpty/RTLAirLink/releases/download/v0.2.0/install-rtlairlink.sh && bash install-rtlairlink.sh
+~~~
 
+Trình cài tải gói và các phụ thuộc, kiểm tra SHA‑256, hiện thay đổi OpenCore rồi sao lưu các tệp EFI cần thay. Gói ZIP cũng có Install-RTLAirLink.command để mở trực tiếp. Sau khi cài thành công, khởi động lại để nạp kext. [Hướng dẫn cài](docs/INSTALL.md)
 
-Bản phát hành **v0.1.0 vẫn là thử nghiệm**. Quá trình phát triển đã có truyền file thật hai chiều qua AWDL nhưng còn Waiting và mất dấu thiết bị. Bản này sửa hai lỗi phản hồi BlockAck và bổ sung tên hiển thị RTLAirLink. Kiểm thử mã nguồn và build đã qua; bộ kext đổi tên vẫn cần xác nhận đầy đủ bridge, tên trong System Information và độ ổn định sau boot. Tên/ảnh liên hệ trùng do tài khoản không được thay đổi bởi driver.
+## Kết quả kiểm thử
 
-Môi trường kiểm tra hiện tại: RTL8852BE, Intel/x86_64, macOS build `25G241`, Legacy UUID `4C07538B-62EB-3D6D-AEF9-93BCDCF45FAB`. Không coi danh sách PCI ID kế thừa là danh sách card đã hỗ trợ hoàn chỉnh.
+Mã nguồn làm nền cho bản phát hành đã truyền file hai chiều qua IPv6 trên awdl0 với RTL8852BE, macOS build 25G241 và cấu hình Bluetooth riêng. Mac gửi thành công 6/8 lượt. Chiều ngược lại nhận một ảnh 922.428 byte, khớp SHA‑256 với ảnh gốc. Hai lượt gửi dừng khi dò dịch vụ Companion. Bộ kext v0.2.0 đã qua kiểm thử build và trình cài. Việc xác nhận sau boot với các bundle ID mới còn chờ. [Chi tiết](docs/STATUS.md)
 
-Xem [hướng dẫn cài](docs/INSTALL.md) và [cách build](docs/BUILD.md).
-
-Gói tương ứng cũng có tại [GitHub Packages](https://github.com/users/taingo936-ui/packages/container/package/rtlairlink), địa chỉ `ghcr.io/taingo936-ui/rtlairlink:v0.1.0`. Gói OCI chứa nguyên năm file của Release; xem [cách tải bằng ORAS](docs/PACKAGES.md). Có thể tải ZIP trực tiếp trong Releases.
-
-Theo hướng dẫn AirPort_RTW89 gốc, phải có thêm **IOSkywalkFamily.kext, IO80211FamilyLegacy.kext và AMFIPass.kext**, ngoài Lilu. Gói Release kèm `Download-Dependencies.command` để tải đúng ba ZIP từ nguồn OCLP và kiểm tra SHA256. Xem [dependency và cấu hình OpenCore](docs/DEPENDENCIES.md) để biết thứ tự nạp, bỏ plugin Broadcom, chặn Skywalk hệ thống, SecureBootModel và boot-arg Tahoe. Ba binary bên ngoài không được đóng lại trong gói của dự án, giống cách phát hành upstream.
-
-Lệnh build:
-
-```bash
-bash build.sh
-```
-
-Kết quả nằm trong `build/<timestamp>/VERIFIED_KEXTS`. Script không cài vào EFI hay tự reboot. Các dependency Apple, Lilu và Bluetooth cần có riêng; repo không kèm EFI cá nhân, log hay bản kext hệ thống Apple.
-
-Giữ LICENSE, phần ghi công tác giả gốc và các giấy phép dependency khi phân phối lại. Mã nguồn tương ứng với bản phát hành được cung cấp trong repo và source archive của release. Firmware Realtek giữ giấy phép riêng, không chuyển thành GPL.
+[Build từ mã nguồn](docs/BUILD.md) · [Giấy phép và ghi công](CREDITS.md)

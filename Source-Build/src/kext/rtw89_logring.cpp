@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 /*
  * The driver's own log: every line it writes with IOLog also goes into a
- * 64 KB ring here, which `rtw89ctl log` reads back (setProperties "log").
+ * 64 KB ring here, which `rtlairlinkctl log` reads back (setProperties "log").
  *
  * Loaded from the EFI, the driver's IOLog lines never reach the unified log,
  * and the kernel's message buffer (dmesg) is small and fills with other

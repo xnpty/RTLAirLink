@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* RTLAirLink integration and release changes dated 2026-11-21. */
 /*
  * Self-test for the compat code written for rtw89 (rtw89_compat.h helpers,
  * rtw89_cfg80211.c, rtw89_mac80211.c). Compiled like a driver file, linked
@@ -281,6 +282,32 @@ static void test_crypto(void)
             rtw89_aes_cmac_vector(k, 3, pieces, lens, out);
             CHECK(hex_is(out, "51f0bebf7e3b9d92fc49741779363cfe", 16));
         }
+    }
+    {
+        /* CCMP, IEEE 802.11-2016 J.6.4 */
+        static const u8 tk[16] = {
+            0xc9, 0x7c, 0x1f, 0x67, 0xce, 0x37, 0x11, 0x85,
+            0x51, 0x4a, 0x8a, 0x19, 0xf2, 0xbd, 0xd5, 0x2f,
+        };
+        static const u8 hdr[24] = {
+            0x08, 0x48, 0xc3, 0x2c, 0x0f, 0xd2, 0xe1, 0x28, 0xa5, 0x7c, 0x50, 0x30,
+            0xf1, 0x84, 0x44, 0x08, 0xab, 0xae, 0xa5, 0xb8, 0xfc, 0xba, 0x80, 0x33,
+        };
+        static const u8 plain[20] = {
+            0xf8, 0xba, 0x1a, 0x55, 0xd0, 0x2f, 0x85, 0xae, 0x96, 0x7b,
+            0xb6, 0x2f, 0xb6, 0xcd, 0xa8, 0xeb, 0x7e, 0x78, 0xa0, 0x50,
+        };
+        u8 buf[20], mic[8];
+
+        memcpy(buf, plain, sizeof(buf));
+        rtw89_ccmp_encrypt(tk, hdr, sizeof(hdr), 0xb5039776e70cULL, buf, sizeof(buf), mic);
+        CHECK(hex_is(buf, "f3d0a2fe9a3dbf2342a643e43246e80c3c04d019", 20));
+        CHECK(hex_is(mic, "7845ce0b16f97623", 8));
+        CHECK(rtw89_ccmp_decrypt(tk, hdr, sizeof(hdr), 0xb5039776e70cULL, buf, sizeof(buf), mic));
+        CHECK(!memcmp(buf, plain, sizeof(buf)));
+        /* a changed address or packet number fails the MIC */
+        rtw89_ccmp_encrypt(tk, hdr, sizeof(hdr), 0xb5039776e70cULL, buf, sizeof(buf), mic);
+        CHECK(!rtw89_ccmp_decrypt(tk, hdr, sizeof(hdr), 0xb5039776e70dULL, buf, sizeof(buf), mic));
     }
 }
 
@@ -666,6 +693,70 @@ out_hw:
 }
 
 int rtw89_selftest(void);
+
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+#include "owly_awdl_mc.h"
+#include "owly_native_link.h"
+/* ---- multichannel AWDL slot policy (owly_awdl_mc.h) ---- */
+static void test_owly_mc(void)
+{
+    uint32_t until;
+    /* No peers: only the two discovery slots. */
+    CHECK(owly_mc_pick_slots(0, 0, false) == 0x0101);
+    /* Peers, every slot on ch 6: six, interleaved (0 8 4 12 2 10). */
+    CHECK(owly_mc_pick_slots(0xffff, 2, false) == 0x1515);
+    /* Data in flight: twelve slots, the AP keeps four. */
+    CHECK(__builtin_popcount(owly_mc_pick_slots(0xffff, 1, true)) == 12);
+    /* Keep slot 0 and overlap the peers in the remaining visits. */
+    CHECK(owly_mc_pick_slots(0x00f0, 1, false) == 0x00f1);
+    CHECK(owly_mc_pick_slots(0x0404, 1, false) == 0x0405);
+    /* Peers heard, schedule unknown: treated as all slots. */
+    CHECK(owly_mc_pick_slots(0x0000, 1, false) == 0x1515);
+    /* Slot arithmetic: AW 5 is slot 1, three AWs (minus phase) to slot 2. */
+    CHECK(owly_mc_slot(5, 1000, &until) == 1);
+    CHECK(until == 2 * OWLY_MC_AW_US + (OWLY_MC_AW_US - 1000));
+    CHECK(owly_mc_slot(63, 0, &until) == 15 && until == OWLY_MC_AW_US);
+    CHECK(owly_mc_slot(64, 0, NULL) == 0);
+    /* In a chosen slot; in the lead before one; not otherwise. */
+    CHECK(owly_mc_want_social(0x0001, 0, 50000, OWLY_MC_LEAD_US));
+    CHECK(!owly_mc_want_social(0x0001, 1, 50000, OWLY_MC_LEAD_US));
+    CHECK(owly_mc_want_social(0x0004, 1, OWLY_MC_LEAD_US, OWLY_MC_LEAD_US));
+    CHECK(owly_mc_want_social(0x0001, 15, 100, OWLY_MC_LEAD_US));
+    CHECK(!owly_mc_want_social(0x0002, 15, 100, OWLY_MC_LEAD_US));
+    /* Wake for the lead, or just after the edge once inside it. */
+    CHECK(owly_mc_next_check_us(20000, OWLY_MC_LEAD_US) == 20000 - OWLY_MC_LEAD_US);
+    CHECK(owly_mc_next_check_us(OWLY_MC_LEAD_US, OWLY_MC_LEAD_US) == OWLY_MC_LEAD_US + 200);
+    /* A 15 ms band change: the lead settles near 17 ms, capped at 25. */
+    {
+        uint32_t avg = 0, lead = 0;
+        for (int i = 0; i < 40; i++)
+            lead = owly_mc_lead(&avg, 15000);
+        CHECK(lead >= 16000 && lead <= 17100);
+        CHECK(owly_mc_lead(&avg, 900000) <= OWLY_MC_LEAD_MAX_US);
+        CHECK(owly_mc_want_social(0x0004, 1, 16000, lead));
+    }
+
+    /* The schedule clock: local time when no root is known, and it keeps
+     * answering while TX is paused (the radio is with the AP). */
+    static struct owly_native_link link;
+    static const uint8_t local[6] = {0x02, 1, 2, 3, 4, 5};
+    uint16_t seq, slots = 7;
+    uint32_t phase;
+    unsigned peers = 9;
+    owly_link_reset(&link);
+    owly_link_reconcile(&link, true, local, 6, 1000000);
+    owly_link_set_tx_paused(&link, true, 1000000);
+    CHECK(!owly_link_clock(&link, 1000000 + 5 * OWLY_LINK_AW_US + 77, &seq, &phase,
+                           &slots, &peers));
+    CHECK(seq == (uint16_t)((1000000 + 5 * OWLY_LINK_AW_US + 77) / OWLY_LINK_AW_US));
+    CHECK(phase == (uint32_t)((1000000 + 5 * OWLY_LINK_AW_US + 77) % OWLY_LINK_AW_US));
+    CHECK(slots == 0 && peers == 0);
+}
+#else
+static void test_owly_mc(void) {}
+#endif
+
+
 int rtw89_selftest(void)
 {
     int ret;
@@ -679,6 +770,7 @@ int rtw89_selftest(void)
     test_crypto();
     test_cfg80211_helpers();
     test_stack();
+    test_owly_mc();
 
     rtw88_compat_exit();
     return failures;

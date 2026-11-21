@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 /*
- * Native Wi-Fi: the driver's side of the seam to AirPortRTW89Front
+ * Native Wi-Fi: the driver's side of the seam to RTLAirLinkFront
  * (src/front/rtw89_front_api.h). When the front is in the registry, the kext
  * does not publish an Ethernet interface of its own; it connects to the front
  * and answers what IO80211 asks: scan, join, state, and the data frames of the
  * Wi-Fi interface. The requests and their answers follow AirPort_RTW88's
- * controller (reference/airport_rtw88/kext/AirportRTW88.cpp), which follows
+ * controller (AirPort_RTW88's AirportRTW88.cpp), which follows
  * AirportItlwm; the structures are the old family's (Ventura), which is what
  * OpenCore puts back on later systems.
  */
-#include "AirPortRTW89.hpp"
+#include "RTLAirLink.hpp"
 #include "rtw89_chips.h"
-#include "rtw89_host_assoc.h"
+#include "rtw89_scan_ioctl.hpp"
+#include "../rtw89_release.h"
 
 #include <IOKit/80211/apple80211_ioctl.h>
 #include <IOKit/80211/apple80211_var.h>
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IOLib.h>
 #include <libkern/version.h>
+#include <pexpert/pexpert.h>
 #include <sys/errno.h>
 #include <sys/kpi_mbuf.h>
 #include <sys/systm.h>
@@ -26,17 +29,28 @@
 #include <kern/task.h>
 #endif
 
-#define LOG(fmt, ...) IOLog("AirPort_RTW89: " fmt "\n", ##__VA_ARGS__)
+#define LOG(fmt, ...) IOLog("RTLAirLink: " fmt "\n", ##__VA_ARGS__)
 
 static_assert(sizeof(struct apple80211_scan_result) == 1164, "scan result layout is not Ventura's");
 
-struct AirPort_RTW89::NativeState {
+/* enough bits for request numbers 0..511 */
+#define RTW89_SEEN_WORDS 8
+
+struct RTLAirLink::NativeState {
     struct rtw89_front_ops front = {};
     struct apple80211_scan_result scanResult = {};
     unsigned int scanCursor = 0;
+    /* the list being read, strongest first: addresses, taken when reading
+     * starts (scanCursor 0) */
+    uint8_t scanOrder[128][6] = {};
+    unsigned int scanOrderLen = 0;
     bool scanInProgress = false;
     bool scanBootstrapTried = false;
+    uint64_t awdlScansDeferred = 0;
     uint64_t lastConnectedScan = 0;     /* uptime (ns) of the last scan while connected */
+    uint64_t scanAskedAt = 0;           /* uptime (ns) of macOS's previous background scan request */
+    uint64_t scanAskedFrames = 0;       /* data frames (tx+rx) at that request */
+    uint64_t scansHeldBusy = 0;         /* requests answered from the cache because the link was busy */
     uint32_t authLower = APPLE80211_AUTHTYPE_OPEN;
     uint32_t authUpper = APPLE80211_AUTHTYPE_NONE;
     uint8_t countryCode[APPLE80211_MAX_CC_LEN] = { 'Z', 'Z', 0 };
@@ -53,10 +67,30 @@ struct AirPort_RTW89::NativeState {
      * form (too long for apple80211_key); wiped once the join has started. */
     uint8_t joinPass[64] = {};
     uint8_t joinPassLen = 0;
+    /* Request numbers already logged as not answered here, one bit each, so
+     * that a request macOS repeats does not fill the log. */
+    uint64_t seenUnhandled[RTW89_SEEN_WORDS] = {};
     /* OWLY_NATIVE_IDENTITY_BRIDGE_BEGIN: opaque Apple identity only. */
     struct rtw89_front_native_vif_state airlink = {};
     /* OWLY_NATIVE_IDENTITY_BRIDGE_END */
 };
+
+/* The first bytes of a buffer, for the log. */
+
+/* True the first time @number is seen. The bitmap covers every request number
+ * the family knows (the highest in apple80211_ioctl.h is 353); a number past
+ * the end is logged once per sighting, which is the lesser evil. */
+static bool firstSighting(uint64_t seen[RTW89_SEEN_WORDS], int number)
+{
+    unsigned int n = (unsigned int)number;
+
+    if (number < 0 || n >= RTW89_SEEN_WORDS * 64)
+        return true;
+    if (seen[n / 64] & (1ULL << (n % 64)))
+        return false;
+    seen[n / 64] |= 1ULL << (n % 64);
+    return true;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Small helpers                                                       */
@@ -70,13 +104,24 @@ struct AirPort_RTW89::NativeState {
  */
 /*
  * Whether macOS is told the card does SAE and protected management frames
- * (capability bytes 9 and 6, see APPLE80211_IOC_CARD_CAPABILITIES). Off until
- * the WPA3 join itself is done: told so, macOS picks SAE on WPA2/WPA3 mixed
- * networks too and the join fails where WPA2 would have worked, and it may
- * choose WPA2 networks that require frame protection. With it off, WPA3-only
- * networks are refused by macOS before they reach the driver.
+ * (capability bytes 9 and 6, see APPLE80211_IOC_CARD_CAPABILITIES). Told so,
+ * macOS sends WPA3 joins (and WPA2 ones) with the password itself, and picks
+ * SAE on WPA2/WPA3 mixed networks too; the MLME falls back to WPA2 there if
+ * SAE does not get through. Without it, WPA3-only networks are refused by
+ * macOS before they reach the driver. Boot-arg -rtw89nowpa3 turns it off.
  */
-static const bool kAdvertiseWPA3 = false;
+static bool advertiseWPA3()
+{
+    static int state;   /* 0: not read yet, 1: on, 2: off */
+
+    if (!state) {
+        int dummy;
+
+        state = PE_parse_boot_argn("-rtw89nowpa3", &dummy, sizeof(dummy)) ? 2 : 1;
+    }
+    return state == 1;
+}
+
 
 struct Scratch {
     void *p;
@@ -96,6 +141,63 @@ static unsigned int channelOfFreq(unsigned int freq)
         return (freq - 2407) / 5;
     if (freq >= 5000 && freq < 5925)
         return (freq - 5000) / 5;
+    if (freq == 5935)
+        return 2;
+    if (freq >= 5955 && freq <= 7115)       /* 6 GHz */
+        return (freq - 5950) / 5;
+    return 0;
+}
+
+/* 6 GHz: not in the SDK's list. Read off IO80211.framework (Sequoia), which
+ * tests this bit before it treats a scan channel as 6 GHz (PSC or not). */
+enum { kChannelFlag6GHz = 0x2000 };
+
+/*
+ * The joined access point's last beacon, as a whole frame after its length:
+ * not in the SDK either. The family's getBeaconInfo asks for it with a
+ * 0x404-byte buffer, and CoreWLAN's networkHiddenOrBroadcast, which airportd
+ * runs after every join, looks for the SSID element in it from byte 0x28 (4 of
+ * length, 24 of header, 12 of fixed fields). No answer, or no such element,
+ * and the network is remembered as a hidden one.
+ */
+enum { kIocBeaconInfo = 346 };
+struct BeaconInfo {
+    uint32_t len;
+    uint8_t frame[1024];
+} __attribute__((packed));
+static_assert(sizeof(BeaconInfo) == 0x404, "beacon info is not the family's size");
+
+/*
+ * The other way, for the channels macOS names in a scan request.  Its own
+ * flags say which band, since channel numbers repeat across them; 0 for a
+ * channel this driver would not scan anyway.
+ */
+static unsigned int freqOfChannel(unsigned int channel, unsigned int flags)
+{
+    if (flags & APPLE80211_C_FLAG_2GHZ) {
+        if (channel == 14)
+            return 2484;
+        if (channel >= 1 && channel <= 13)
+            return 2407 + 5 * channel;
+        return 0;
+    }
+    if (flags & kChannelFlag6GHz) {
+        if (channel == 2)
+            return 5935;
+        if (channel >= 1 && channel <= 233)
+            return 5950 + 5 * channel;
+        return 0;
+    }
+    if (flags & APPLE80211_C_FLAG_5GHZ) {
+        if (channel >= 1 && channel <= 184)
+            return 5000 + 5 * channel;
+        return 0;
+    }
+    /* no band given: the one the number is unambiguous in */
+    if (channel >= 1 && channel <= 14)
+        return channel == 14 ? 2484 : 2407 + 5 * channel;
+    if (channel >= 36 && channel <= 184)
+        return 5000 + 5 * channel;
     return 0;
 }
 
@@ -123,6 +225,10 @@ static const uint32_t kEnterpriseAuth = APPLE80211_AUTHTYPE_WPA | APPLE80211_AUT
 static const uint32_t kPersonalAuth = APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK |
                                       APPLE80211_AUTHTYPE_SHA256_PSK;
 
+/* SAE (WPA3-Personal): the header's bit, and the one Sequoia's IO80211
+ * framework builds for its SAE joins (Apple80211Associate2). */
+static const uint32_t kSaeAuth = APPLE80211_AUTHTYPE_WPA3_SAE | 0x1000;
+
 static bool isEnterprise(uint32_t upper)
 {
     return (upper & kEnterpriseAuth) && !(upper & kPersonalAuth);
@@ -138,12 +244,14 @@ static bool isJoining(const struct rtw89_glue_link &link)
     return link.state == RTW89_GLUE_LINK_JOINING || link.state == RTW89_GLUE_LINK_ASSOCIATED;
 }
 
-static uint32_t channelFlags(unsigned int channel, unsigned int width)
+/* The band comes from the frequency: 6 GHz reuses the channel numbers. */
+static uint32_t channelFlags(unsigned int freq, unsigned int width)
 {
     return APPLE80211_C_FLAG_ACTIVE |
            (width >= 80 ? APPLE80211_C_FLAG_80MHZ :
             width >= 40 ? APPLE80211_C_FLAG_40MHZ : APPLE80211_C_FLAG_20MHZ) |
-           (channel <= 14 ? APPLE80211_C_FLAG_2GHZ : APPLE80211_C_FLAG_5GHZ);
+           (freq < 3000 ? APPLE80211_C_FLAG_2GHZ :
+            freq < 5925 ? APPLE80211_C_FLAG_5GHZ : kChannelFlag6GHz);
 }
 
 /* A network of the scan list in the form IO80211 wants. @fullIes: all of its
@@ -156,7 +264,7 @@ static void fillScanResult(const struct rtw89_glue_bss &bss, const uint8_t *ies,
     d->asr_channel.version = APPLE80211_VERSION;
     d->asr_channel.channel = bss.channel;
     /* the AP's own width: macOS weighs it when it picks between networks */
-    d->asr_channel.flags = channelFlags(bss.channel, bss.width ? bss.width : 20);
+    d->asr_channel.flags = channelFlags(bss.freq, bss.width ? bss.width : 20);
     d->asr_noise = -95;
     d->asr_rssi = bss.signal;
     d->asr_snr = (int16_t)(bss.signal - d->asr_noise);
@@ -194,26 +302,69 @@ static void fillScanResult(const struct rtw89_glue_bss &bss, const uint8_t *ies,
 }
 
 /*
- * The join request's layout is in rtw89_host_assoc.h, which the kext decodes
- * with. Its apple80211 values must be the SDK's.
+ * The join request as Sequoia (900 bytes) and Tahoe (908 bytes) send it. The
+ * old family would cut it down to Ventura's structure, where mode and both
+ * authentication fields are narrower. Only the shared first 108 bytes are
+ * read (RTW88AssocWire in the reference).
  */
-static_assert(RTW89_HOST_AP_MODE_INFRA == APPLE80211_AP_MODE_INFRA, "AP mode is not the SDK's");
-static_assert(RTW89_HOST_AUTH_NONE == APPLE80211_AUTHTYPE_NONE, "auth none is not the SDK's");
-static_assert(RTW89_HOST_AUTH_OPEN == APPLE80211_AUTHTYPE_OPEN, "auth open is not the SDK's");
-static_assert(RTW89_HOST_AUTH_WPA == APPLE80211_AUTHTYPE_WPA, "auth WPA is not the SDK's");
-static_assert(RTW89_HOST_AUTH_WPA_PSK == APPLE80211_AUTHTYPE_WPA_PSK, "auth WPA-PSK is not the SDK's");
-static_assert(RTW89_HOST_AUTH_WPA2 == APPLE80211_AUTHTYPE_WPA2, "auth WPA2 is not the SDK's");
-static_assert(RTW89_HOST_AUTH_WPA2_PSK == APPLE80211_AUTHTYPE_WPA2_PSK, "auth WPA2-PSK is not the SDK's");
-static_assert(RTW89_HOST_AUTH_8021X == APPLE80211_AUTHTYPE_8021X, "auth 802.1X is not the SDK's");
-static_assert(RTW89_HOST_AUTH_SHA256_PSK == APPLE80211_AUTHTYPE_SHA256_PSK, "auth SHA256-PSK is not the SDK's");
-static_assert(RTW89_HOST_AUTH_SHA256_8021X == APPLE80211_AUTHTYPE_SHA256_8021X,
-              "auth SHA256-802.1X is not the SDK's");
+struct HostAssoc {
+    uint32_t upper, ssidLen, keyLen, cipher;
+    uint8_t ssid[32], bssid[6], key[64];
+};
+
+/* The newer request's key type when the key is the passphrase itself: what
+ * macOS sends once the card says it does SAE (it then leaves deriving the
+ * pairwise master key to the driver). Seen with WPA2-PSK. */
+enum { kHostCipherPassphrase = 10 };
+/* Bytes of the request read: up to the end of a 64-byte key at 76. */
+enum { kHostAssocPrefix = 140 };
+
+static uint32_t le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static bool decodeHostAssoc(const uint8_t *p, struct HostAssoc *out)
+{
+    uint32_t upper = le32(p + 12), ssidLen = le32(p + 16), keyLen = le32(p + 64);
+
+    /* the key's version at 60: none on an open network (seen on
+     * TDSB-Guest, Sequoia's 900 bytes) */
+    if (le32(p) != 1 || le32(p + 4) != 2 || le32(p + 8) != 1 ||
+        (le32(p + 60) != 1 && !(le32(p + 60) == 0 && upper == 0 && keyLen == 0)))
+        return false;
+    const uint32_t cipher = le32(p + 68);
+    /* SAE, alone or with WPA2-PSK (a mixed network) */
+    const bool sae = (upper & kSaeAuth) && !(upper & ~(kSaeAuth | 8));
+    const bool passphrase = (upper == 8 || sae) && cipher == kHostCipherPassphrase;
+
+    if ((upper != 0 && upper != 8 && !sae && !isEnterprise(upper)) || !ssidLen || ssidLen > 32)
+        return false;
+    if (sae && !passphrase)
+        return false;
+    if (passphrase ? keyLen < 1 || keyLen > 64 : upper == 8 ? keyLen != 32 : keyLen != 0)
+        return false;
+    for (uint32_t i = 0; i < ssidLen; i++)
+        if (!p[20 + i])
+            return false;
+    if (p[52] & 1)
+        return false;
+    bzero(out, sizeof(*out));
+    out->upper = upper;
+    out->ssidLen = ssidLen;
+    out->keyLen = keyLen;
+    out->cipher = cipher;
+    memcpy(out->ssid, p + 20, ssidLen);
+    memcpy(out->bssid, p + 52, 6);
+    memcpy(out->key, p + 76, keyLen);
+    return true;
+}
 
 /*
- * A join request in the envelope form that rtw89_host_assoc_decode() does not
- * take (WPA3 for one, whose layout is not known yet): log its shape so it can
- * be worked out, never its contents. Per 4-byte word, '.' is zero and '#' is
- * not; the fields that are not secret are printed as numbers.
+ * A join request in the newer form that decodeHostAssoc() does not take (WPA3
+ * for one, whose layout is not known yet): log its shape so it can be worked
+ * out, never its contents. Per 4-byte word, '.' is zero and '#' is not; the
+ * fields that are not secret are printed as numbers.
  */
 static void logHostAssocShape(const uint8_t *p, uint32_t len)
 {
@@ -224,9 +375,8 @@ static void logHostAssocShape(const uint8_t *p, uint32_t len)
         map[i] = (p[4 * i] | p[4 * i + 1] | p[4 * i + 2] | p[4 * i + 3]) ? '#' : '.';
     map[i] = 0;
     LOG("join request not understood (%u bytes): head %u %u %u, upper auth 0x%x, name length %u, "
-        "key length %u, key type %u", len, rtw89_host_le32(p), rtw89_host_le32(p + 4),
-        rtw89_host_le32(p + 8), rtw89_host_le32(p + 12), rtw89_host_le32(p + 16),
-        rtw89_host_le32(p + 64), rtw89_host_le32(p + 68));
+        "key length %u, key type %u", len, le32(p), le32(p + 4), le32(p + 8), le32(p + 12),
+        le32(p + 16), le32(p + 64), le32(p + 68));
     for (i = 0; i < words; i += 64) {
         char part[65];
         uint32_t n = words - i < 64 ? words - i : 64;
@@ -264,71 +414,15 @@ static bool assocLooksValid(const struct apple80211_assoc_data *d)
     return secure ? d->ad_key.key_len == 32 : d->ad_key.key_len == 0;
 }
 
-/*
- * A join in the envelope form (rtw89_host_assoc.h) that the family may not take.
- * One that decodes is made here, and *result is its errno. False when the
- * request is not one, or does not decode (its shape is logged): the caller
- * hands it on as before.
- */
-bool AirPort_RTW89::nativeJoinEnvelope(struct apple80211req *req, int *result)
-{
-    const uint32_t len = req->req_len;
-    uint8_t prefix[RTW89_HOST_ASSOC_PREFIX];
-    struct rtw89_host_assoc host;
-
-    if (!req->req_data || !rtw89_host_assoc_size_ok(len))
-        return false;
-    if (copyin((user_addr_t)req->req_data, prefix, sizeof(prefix)) == 0 &&
-        rtw89_host_assoc_decode(prefix, &host)) {
-        Scratch assocBuf(sizeof(struct apple80211_assoc_data));
-        struct apple80211_assoc_data &assoc = *static_cast<struct apple80211_assoc_data *>(assocBuf.p);
-        SInt32 r;
-
-        assoc.version = APPLE80211_VERSION;
-        assoc.ad_mode = APPLE80211_AP_MODE_INFRA;
-        assoc.ad_auth_lower = APPLE80211_AUTHTYPE_OPEN;
-        assoc.ad_auth_upper = host.upper;
-        assoc.ad_ssid_len = host.ssid_len;
-        memcpy(assoc.ad_ssid, host.ssid, host.ssid_len);
-        memcpy(assoc.ad_bssid.octet, host.bssid, 6);
-        assoc.ad_key.version = APPLE80211_VERSION;
-        assoc.ad_key.key_cipher_type = host.cipher;
-        if (host.cipher == RTW89_HOST_CIPHER_PASSPHRASE) {
-            /* longer than apple80211_key's buffer: carried beside it */
-            memcpy(_ns->joinPass, host.key, host.key_len);
-            _ns->joinPassLen = (uint8_t)host.key_len;
-        } else {
-            assoc.ad_key.key_len = host.key_len;
-            memcpy(assoc.ad_key.key, host.key, host.key_len);
-        }
-        r = nativeRequest(true, APPLE80211_IOC_ASSOCIATE, &assoc);
-        bzero(_ns->joinPass, sizeof(_ns->joinPass));
-        _ns->joinPassLen = 0;
-        bzero(&assoc, sizeof(assoc));
-        bzero(&host, sizeof(host));
-        bzero(prefix, sizeof(prefix));
-        *result = errnoOf(r);
-        return true;
-    }
-    bzero(prefix, sizeof(prefix));
-    {
-        Scratch whole(len);
-
-        if (whole.p && copyin((user_addr_t)req->req_data, whole.p, len) == 0)
-            logHostAssocShape(whole.bytes(), len);
-    }
-    return false;
-}
-
 /* ------------------------------------------------------------------ */
 /*  Coming and going                                                    */
 /* ------------------------------------------------------------------ */
 
 enum { kNativeEventLink = 1, kNativeEventScanDone = 2, kNativeEventScanAborted = 4 };
 
-void AirPort_RTW89::nativeEventsCall(thread_call_param_t self, thread_call_param_t)
+void RTLAirLink::nativeEventsCall(thread_call_param_t self, thread_call_param_t)
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(self);
+    RTLAirLink *me = static_cast<RTLAirLink *>(self);
 
     OSIncrementAtomic(&me->_nativeRunning);
     if (!me->_nativeClosing)
@@ -337,7 +431,7 @@ void AirPort_RTW89::nativeEventsCall(thread_call_param_t self, thread_call_param
 }
 
 /* Any context. */
-void AirPort_RTW89::nativeNotify(UInt32 events)
+void RTLAirLink::nativeNotify(UInt32 events)
 {
     if (!_native || _nativeClosing || !_nativeCall)
         return;
@@ -345,7 +439,7 @@ void AirPort_RTW89::nativeNotify(UInt32 events)
     thread_call_enter(_nativeCall);
 }
 
-void AirPort_RTW89::nativeEvents()
+void RTLAirLink::nativeEvents()
 {
     UInt32 events;
 
@@ -371,20 +465,20 @@ void AirPort_RTW89::nativeEvents()
 }
 
 /* interface->postMessage(), once the front has handed over its functions */
-void AirPort_RTW89::nativePost(unsigned int msg, void *data, size_t len)
+void RTLAirLink::nativePost(unsigned int msg, void *data, size_t len)
 {
     if (_ns && _ns->front.post_message)
         _ns->front.post_message(_ns->front.ctx, msg, data, len);
 }
 
-void AirPort_RTW89::nativePowerChanged()
+void RTLAirLink::nativePowerChanged()
 {
     nativePost(APPLE80211_M_POWER_CHANGED);
 }
 
 /* Whether a front personality is in the catalogue: injected by OpenCore, so it
  * will start, if it has not already. */
-bool AirPort_RTW89::frontExpected()
+bool RTLAirLink::frontExpected()
 {
     OSDictionary *matching = OSDictionary::withCapacity(1);
     const OSString *cls = OSString::withCString(RTW89_FRONT_CLASS);
@@ -404,7 +498,7 @@ bool AirPort_RTW89::frontExpected()
 
 /* Called from start(), after the probe. True: the front is there and now
  * ours; the kext must not publish its own interface. */
-bool AirPort_RTW89::connectFront()
+bool RTLAirLink::connectFront()
 {
     OSDictionary *matching = serviceMatching(RTW89_FRONT_CLASS);
     const OSSymbol *name = OSSymbol::withCString(RTW89_FRONT_CONNECT);
@@ -443,7 +537,12 @@ bool AirPort_RTW89::connectFront()
     back.enable = backEnable;
     back.output = backOutput;
     back.power = backPower;
+    back.log = backLog;
     back.vif_event = backVifEvent;
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    back.native_output=backNativeOutput;
+    back.native_window=backNativeWindow;
+#endif
 
     _native = true;         /* the callbacks below may come during the call */
     ret = front->callPlatformFunction(name, true, &back, &_ns->front, nullptr, nullptr);
@@ -477,10 +576,11 @@ bool AirPort_RTW89::connectFront()
 }
 
 #if defined(OWLY_ABI6_FRONT_BRIDGE) && OWLY_ABI6_FRONT_BRIDGE
-/* No Apple packet injection here. The front MUST return false until an
- * ABI-verified P2P native receive consumer is implemented. */
-bool AirPort_RTW89::awdlHandoff(uint32_t kind, const uint8_t *raw, size_t len,
-                                const uint8_t src[6], const uint8_t dst[6])
+/* Borrowed radio data is deep-copied and drained before disconnect. P1's
+ * verified frontend owns native RX; older feature modes remain observers. */
+bool RTLAirLink::awdlHandoff(uint32_t kind, const uint8_t *raw, size_t len,
+                                const uint8_t src[6], const uint8_t dst[6],
+                                uint8_t channel,int8_t rssi,uint64_t received_us)
 {
     /* Lock-protected callback admission. _ns may be deleted only AFTER
      * disconnectFront has CLOSED the gate and drained admitted callbacks.
@@ -505,8 +605,14 @@ bool AirPort_RTW89::awdlHandoff(uint32_t kind, const uint8_t *raw, size_t len,
         struct owly_abi6_packet *packet =
             static_cast<struct owly_abi6_packet *>(IOMalloc(sizeof(struct owly_abi6_packet)));
         if (packet) {
-            if (owly_abi6_packet_make(packet, kind, raw, len, src, dst))
+            if (owly_abi6_packet_make(packet, kind, raw, len, src, dst)) {
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+                packet->channel=channel;packet->rssi=rssi;packet->received_us=received_us;
+#else
+                (void)channel;(void)rssi;(void)received_us;
+#endif
                 ok = handoff(ctx, packet);
+            }
             IOFree(packet, sizeof(struct owly_abi6_packet));
         }
     }
@@ -516,34 +622,64 @@ bool AirPort_RTW89::awdlHandoff(uint32_t kind, const uint8_t *raw, size_t len,
     IOLockUnlock(_owlyRxGateLock);
     return ok;
 }
-bool AirPort_RTW89::awdlRxAction(void *ctx, const uint8_t src[6],
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+bool RTLAirLink::nativeRx(void *ctx,uint32_t kind,const uint8_t *raw,size_t len,
+    const uint8_t src[6],const uint8_t dst[6],uint8_t channel,int8_t rssi,uint64_t received_us)
+{
+    return ctx && static_cast<RTLAirLink *>(ctx)->awdlHandoff(kind,raw,len,src,dst,channel,rssi,received_us);
+}
+uint32_t RTLAirLink::backNativeOutput(void *ctx,mbuf_t m)
+{
+    auto *self=static_cast<RTLAirLink *>(ctx);
+    if(!m)return kIOReturnOutputDropped;
+    size_t n=mbuf_pkthdr_len(m);int rc=-ENETDOWN;
+    if(self && self->_native && self->_ns && !self->_nativeClosing &&
+       !self->_halting && !self->_asleep && self->_ns->airlink.enabled && n>=14 && n<=2062) {
+        Scratch copied(n);
+        if(copied.p && !mbuf_copydata(m,0,n,copied.p))rc=rtw89_glue_native_output(copied.bytes(),n);
+    }
+    mbuf_freem(m); /* all statuses consume once; bounded queue copies before returning */
+    if(self)self->setProperty("OwlyNativeTXEnqueueResult",static_cast<unsigned long long>(static_cast<uint32_t>(rc)),32);
+    return rc ? kIOReturnOutputDropped : kIOReturnOutputSuccess;
+}
+int RTLAirLink::backNativeWindow(void *ctx,struct owly_link_window *out)
+{
+    auto *self=static_cast<RTLAirLink *>(ctx);
+    if(!out)return -EINVAL;
+    bzero(out,sizeof(*out));
+    if(!self || !self->_native || !self->_ns || self->_nativeClosing || self->_halting ||
+       self->_asleep || !self->_ns->airlink.enabled)return -ENETDOWN;
+    return rtw89_glue_native_window(out);
+}
+#endif
+bool RTLAirLink::awdlRxAction(void *ctx, const uint8_t src[6],
                                  unsigned int subtype, unsigned int social_mask,
                                  const uint8_t *raw, size_t len)
 {
     (void)subtype; (void)social_mask;
     /* Address 1 is the 802.11 receiver; packet src came from validated parser. */
-    return static_cast<AirPort_RTW89 *>(ctx)->awdlHandoff(
+    return static_cast<RTLAirLink *>(ctx)->awdlHandoff(
         OWLY_ABI6_PACKET_ACTION, raw, len, src, raw ? raw + 4 : nullptr);
 }
 #if defined(OWLY_ABI6_C3_SCAN_OBSERVER) && OWLY_ABI6_C3_SCAN_OBSERVER
-bool AirPort_RTW89::awdlRxScanSignature(void *ctx, const uint8_t src[6],
+bool RTLAirLink::awdlRxScanSignature(void *ctx, const uint8_t src[6],
                                          const uint8_t *raw, size_t len)
 {
     if (!ctx || !src || !raw || len < 31u) return false;
     /* Borrow only; awdlHandoff makes a deep copy and drains on teardown. */
-    return static_cast<AirPort_RTW89 *>(ctx)->awdlHandoff(
+    return static_cast<RTLAirLink *>(ctx)->awdlHandoff(
         OWLY_ABI6_PACKET_C3_SCAN_SIGNATURE, raw, len, src, raw+4);
 }
 #endif
-bool AirPort_RTW89::awdlRxIPv6(void *ctx, const uint8_t dst[6],
+bool RTLAirLink::awdlRxIPv6(void *ctx, const uint8_t dst[6],
                                const uint8_t src[6], const uint8_t *ip6, size_t len)
 {
-    return static_cast<AirPort_RTW89 *>(ctx)->awdlHandoff(
+    return static_cast<RTLAirLink *>(ctx)->awdlHandoff(
         OWLY_ABI6_PACKET_IPV6, ip6, len, src, dst);
 }
 #endif
 
-void AirPort_RTW89::disconnectFront()
+void RTLAirLink::disconnectFront()
 {
     const OSSymbol *name;
 
@@ -605,7 +741,7 @@ void AirPort_RTW89::disconnectFront()
 /*  From the driver: frames, link, scans                                */
 /* ------------------------------------------------------------------ */
 
-void AirPort_RTW89::nativeRxFrame(const uint8_t *frame, size_t len)
+void RTLAirLink::nativeRxFrame(const uint8_t *frame, size_t len)
 {
     mbuf_t m = _ns->front.alloc_packet(_ns->front.ctx, (unsigned int)len);
 
@@ -618,13 +754,13 @@ void AirPort_RTW89::nativeRxFrame(const uint8_t *frame, size_t len)
     _ns->front.input_packet(_ns->front.ctx, m);
 }
 
-void AirPort_RTW89::nativeTxWake()
+void RTLAirLink::nativeTxWake()
 {
     _ns->front.tx_wake(_ns->front.ctx);
 }
 
 /* The link state changed (publishLink() has the new one). */
-void AirPort_RTW89::nativeLink(const struct rtw89_glue_link &link)
+void RTLAirLink::nativeLink(const struct rtw89_glue_link &link)
 {
     bool up = isConnected(link);
     bool joining = isJoining(link);
@@ -657,9 +793,9 @@ void AirPort_RTW89::nativeLink(const struct rtw89_glue_link &link)
 }
 
 /* A driver thread, with its locks held. */
-void AirPort_RTW89::scanDone(void *ctx, bool aborted)
+void RTLAirLink::scanDone(void *ctx, bool aborted)
 {
-    static_cast<AirPort_RTW89 *>(ctx)->nativeNotify(aborted ? kNativeEventScanAborted :
+    static_cast<RTLAirLink *>(ctx)->nativeNotify(aborted ? kNativeEventScanAborted :
                                                               kNativeEventScanDone);
 }
 
@@ -667,7 +803,7 @@ void AirPort_RTW89::scanDone(void *ctx, bool aborted)
 /*  From the front: rtw89_back_ops                                      */
 /* ------------------------------------------------------------------ */
 
-void AirPort_RTW89::backGetMac(void *ctx, uint8_t mac[6])
+void RTLAirLink::backGetMac(void *ctx, uint8_t mac[6])
 {
     struct rtw89_glue_info info = {};
 
@@ -675,9 +811,9 @@ void AirPort_RTW89::backGetMac(void *ctx, uint8_t mac[6])
     memcpy(mac, info.mac, 6);
 }
 
-int AirPort_RTW89::backSetMac(void *ctx, const uint8_t mac[6])
+int RTLAirLink::backSetMac(void *ctx, const uint8_t mac[6])
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    RTLAirLink *me = static_cast<RTLAirLink *>(ctx);
     int ret;
 
     IOLockLock(me->_commandLock);
@@ -688,9 +824,9 @@ int AirPort_RTW89::backSetMac(void *ctx, const uint8_t mac[6])
     return ret;
 }
 
-int AirPort_RTW89::backEnable(void *ctx, bool on)
+int RTLAirLink::backEnable(void *ctx, bool on)
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    RTLAirLink *me = static_cast<RTLAirLink *>(ctx);
     int ret = 0;
 
     IOLockLock(me->_commandLock);
@@ -708,14 +844,22 @@ int AirPort_RTW89::backEnable(void *ctx, bool on)
  * accepted the transition. No Skywalk queue or data path is connected.
  * The opaque VIF cookie must never be dereferenced here.
  */
-bool AirPort_RTW89::backVifEvent(void *ctx, void *vif, uint32_t role, uint32_t event,
+bool RTLAirLink::backVifEvent(void *ctx, void *vif, uint32_t role, uint32_t event,
                                   const uint8_t request_mac[6])
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    RTLAirLink *me = static_cast<RTLAirLink *>(ctx);
     if (!me || !me->_ns || !vif || role != RTW89_FRONT_ROLE_AIRLINK_OBSERVED ||
         me->_nativeClosing || me->_halting || me->_asleep)
         return false;
     NativeState *ns = me->_ns;
+#if defined(OWLY_AWDL_SERVICE_LIFECYCLE) && OWLY_AWDL_SERVICE_LIFECYCLE
+    if (event == RTW89_FRONT_VIF_SERVICE_READY) {
+        const bool ready = !request_mac && ns->airlink.cookie == vif &&
+            ns->airlink.role == role && rtw89_glue_awdl_service_ready();
+        me->setProperty("OwlyServiceBackendReadyLast", ready);
+        return ready; /* No identity, enabled bit, template or radio mutation. */
+    }
+#endif
     /* Check the identity transition BEFORE touching the radio. */
     struct rtw89_front_native_vif_state next = ns->airlink;
     if (!rtw89_front_native_vif_update(&next, vif, role, event)) {
@@ -729,11 +873,19 @@ bool AirPort_RTW89::backVifEvent(void *ctx, void *vif, uint32_t role, uint32_t e
         if (!request_mac) return false;
         rc = rtw89_glue_awdl_vif_create(request_mac);
     } else if (event == RTW89_FRONT_VIF_ENABLED) {
-        /* Only state tracking. Never claim RF TX/Skywalk/AWDL readiness. */
+        /* An Apple re-enable can prepare a new native sync transaction. */
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+        if (!ns->airlink.enabled) rc = rtw89_glue_awdl_vif_enable();
+        else
+#endif
         if (!rtw89_glue_awdl_vif_present()) rc = -1;
 #if defined(OWLY_AWDL_SOFTWARE_SYNC) && OWLY_AWDL_SOFTWARE_SYNC
     } else if (event == RTW89_FRONT_VIF_DISABLED) {
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+        rc = rtw89_glue_awdl_vif_disable();
+#else
         rc = rtw89_glue_awdl_sync_enable(false);
+#endif
 #endif
     } else if (event == RTW89_FRONT_VIF_DESTROYED) {
         rc = rtw89_glue_awdl_vif_destroy();
@@ -752,14 +904,14 @@ bool AirPort_RTW89::backVifEvent(void *ctx, void *vif, uint32_t role, uint32_t e
 }
 /* OWLY_NATIVE_IDENTITY_BRIDGE_END */
 
-void AirPort_RTW89::backPower(void *ctx, bool on)
+void RTLAirLink::backPower(void *ctx, bool on)
 {
     /* sleep and wake: not handled yet */
 }
 
-uint32_t AirPort_RTW89::backOutput(void *ctx, mbuf_t m)
+uint32_t RTLAirLink::backOutput(void *ctx, mbuf_t m)
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    RTLAirLink *me = static_cast<RTLAirLink *>(ctx);
     size_t len = mbuf_pkthdr_len(m);
     uint8_t *frame = nullptr;
     void *handle;
@@ -786,9 +938,28 @@ uint32_t AirPort_RTW89::backOutput(void *ctx, mbuf_t m)
     return result;
 }
 
-int AirPort_RTW89::backRequest(void *ctx, unsigned int type, int number, void *interface, void *data)
+/*
+ * One line of the front's log, put in the same ring as ours so that the two
+ * halves of an event read in order. The driver is built with IOLog redefined
+ * to the ring's own function, so this is simply IOLog; the front is not, and
+ * its own IOLog reaches nothing on a kext loaded from the EFI.
+ */
+void RTLAirLink::backLog(void *ctx, const char *line)
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    if (line)
+        IOLog("%s\n", line);
+}
+
+/*
+ * A packet the family sent to awdl0. Unlike backOutput() above there is no
+ * queue behind this and nothing to stall against: AWDL frames go out inside
+ * availability windows, so a packet that cannot go now is dropped rather than
+ * offered again later, when its window has passed anyway.
+ */
+
+int RTLAirLink::backRequest(void *ctx, unsigned int type, int number, void *interface, void *data)
+{
+    RTLAirLink *me = static_cast<RTLAirLink *>(ctx);
 
     if (type != SIOCGA80211 && type != SIOCSA80211)
         return kIOReturnBadArgument;
@@ -808,13 +979,30 @@ int AirPort_RTW89::backRequest(void *ctx, unsigned int type, int number, void *i
  * requests itself; the exceptions are the ones whose layout differs on newer
  * systems or which it does not pass on (AirPort_RTW88's apple80211_ioctl()).
  */
-int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet, unsigned long cmd,
+int RTLAirLink::nativeScanHostPayload(unsigned int number, const void *payload,
+                                         uint32_t length, const char *entry)
+{
+    Scratch decoded(sizeof(apple80211_scan_data));
+    if (!decoded.p)
+        return ENOMEM;
+    auto &scan = *static_cast<apple80211_scan_data *>(decoded.p);
+    if (!rtw89DecodeHostScan(number, payload, length, scan)) {
+        LOG("native scan bridge rejected: %s, type %u, wire size %u", entry, number, length);
+        return EINVAL;
+    }
+    LOG("native scan bridge: %s, type %u, wire size %u, target length %u, channels %u",
+        entry, number, length, scan.ssid_len, scan.num_channels);
+    return errnoOf(nativeRequest(true, APPLE80211_IOC_SCAN_REQ, &scan));
+}
+
+int RTLAirLink::backIoctl(void *ctx, void *interface, void *vif, void *ifnet, unsigned long cmd,
                              void *data, bool *handled)
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    RTLAirLink *me = static_cast<RTLAirLink *>(ctx);
     struct rtw89_front_ops *front = &me->_ns->front;
     struct apple80211req *req = static_cast<struct apple80211req *>(data);
-    bool isGet = cmd == SIOCGA80211, isSet = cmd == SIOCSA80211;
+    bool isGet = cmd == SIOCGA80211 || (req && rtw89ScanGet40(cmd, (unsigned int)req->req_type));
+    bool isSet = cmd == SIOCSA80211 || (req && rtw89ScanSet40(cmd, (unsigned int)req->req_type));
 
     /* requests can arrive while the front is still attaching the interface,
      * before it has handed over its functions: those are the family's */
@@ -837,11 +1025,55 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
     const uint32_t len = req->req_len;
     const user_addr_t reqData = (user_addr_t)req->req_data;
 
-    if (isSet && reqType == APPLE80211_IOC_ASSOCIATE) {
-        int e;
+    /*
+     * The join request macOS sends: 856 bytes on Sonoma, 900 on Sequoia, 908
+     * on Tahoe.  Only the size differs -- the first kHostAssocPrefix bytes,
+     * which is all that is read, are laid out the same in all three -- so
+     * Sonoma was failing to associate for want of its number being listed
+     * (issue #4).
+     */
+    if (isSet && reqType == APPLE80211_IOC_ASSOCIATE &&
+        (len == 856 || len == 900 || len == 908) && reqData) {
+        uint8_t prefix[kHostAssocPrefix];
+        struct HostAssoc host;
 
-        if (me->nativeJoinEnvelope(req, &e))
-            return e;
+        if (copyin(reqData, prefix, sizeof(prefix)) == 0 && decodeHostAssoc(prefix, &host)) {
+            Scratch assocBuf(sizeof(struct apple80211_assoc_data));
+            struct apple80211_assoc_data &assoc = *static_cast<struct apple80211_assoc_data *>(assocBuf.p);
+            SInt32 r;
+
+            assoc.version = APPLE80211_VERSION;
+            assoc.ad_mode = APPLE80211_AP_MODE_INFRA;
+            assoc.ad_auth_lower = APPLE80211_AUTHTYPE_OPEN;
+            assoc.ad_auth_upper = host.upper;
+            assoc.ad_ssid_len = host.ssidLen;
+            memcpy(assoc.ad_ssid, host.ssid, host.ssidLen);
+            memcpy(assoc.ad_bssid.octet, host.bssid, 6);
+            assoc.ad_key.version = APPLE80211_VERSION;
+            assoc.ad_key.key_cipher_type = host.cipher;
+            if (host.cipher == kHostCipherPassphrase) {
+                /* longer than apple80211_key's buffer: carried beside it */
+                memcpy(me->_ns->joinPass, host.key, host.keyLen);
+                me->_ns->joinPassLen = (uint8_t)host.keyLen;
+            } else {
+                assoc.ad_key.key_len = host.keyLen;
+                memcpy(assoc.ad_key.key, host.key, host.keyLen);
+            }
+            r = me->nativeRequest(true, APPLE80211_IOC_ASSOCIATE, &assoc);
+            bzero(me->_ns->joinPass, sizeof(me->_ns->joinPass));
+            me->_ns->joinPassLen = 0;
+            bzero(&assoc, sizeof(assoc));
+            bzero(&host, sizeof(host));
+            bzero(prefix, sizeof(prefix));
+            return errnoOf(r);
+        }
+        bzero(prefix, sizeof(prefix));
+        {
+            Scratch whole(len);
+
+            if (whole.p && copyin(reqData, whole.p, len) == 0)
+                logHostAssocShape(whole.bytes(), len);
+        }
     }
 
     const bool scanBridge = (isGet && reqType == APPLE80211_IOC_SCAN_RESULT) ||
@@ -921,7 +1153,9 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
     if (!payload)
         return ENOMEM;
     int e = copyin(reqData, payload, len);
-    if (!e)
+    if (!e && rtw89HostScanLayout(reqType, len))
+        e = me->nativeScanHostPayload(reqType, payload, len, "bsd");
+    else if (!e)
         e = errnoOf(me->nativeRequest(true, reqType, payload));
     IOFree(payload, len);
     return e;
@@ -929,10 +1163,10 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
 
 /* The other way requests come in on newer systems: already split into get
  * and set, with either the wrapper or the unpacked structure as @data. */
-int AirPort_RTW89::backIoctlSet(void *ctx, void *interface, void *vif, void *skywalk, void *data,
+int RTLAirLink::backIoctlSet(void *ctx, void *interface, void *vif, void *skywalk, void *data,
                                 bool *handled)
 {
-    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    RTLAirLink *me = static_cast<RTLAirLink *>(ctx);
     struct rtw89_front_ops *front = &me->_ns->front;
     const UInt32 before = me->_ns->assocRequests;
     int sr;
@@ -944,6 +1178,25 @@ int AirPort_RTW89::backIoctlSet(void *ctx, void *interface, void *vif, void *sky
     *handled = true;
     if (data && interface == front->interface && !vif) {
         struct apple80211req *req = static_cast<struct apple80211req *>(data);
+
+        /* This SET entry has no ioctl command word. Handle the known host
+         * layouts before the legacy family reads its sixteen-slot structure. */
+        if (version_major >= 23 && rtw89HostScanLayout((unsigned int)req->req_type, req->req_len)) {
+            if (!req->req_data)
+                return EFAULT;
+            Scratch payload(req->req_len);
+            if (!payload.p)
+                return ENOMEM;
+            int error = copyin((user_addr_t)req->req_data, payload.p, req->req_len);
+            if (!error)
+                return me->nativeScanHostPayload((unsigned int)req->req_type,
+                                                 payload.p, req->req_len, "split-set");
+            // An internal family request may already own a kernel buffer.
+            // Do not dereference it speculatively; retain the original parser.
+            LOG("native scan bridge deferred: split-set copyin error %d", error);
+            *handled = false;
+            return 0;
+        }
 
         if (req->req_type == APPLE80211_IOC_POWERSAVE && req->req_len == 0 &&
             req->req_val >= APPLE80211_POWERSAVE_MODE_DISABLED &&
@@ -961,13 +1214,6 @@ int AirPort_RTW89::backIoctlSet(void *ctx, void *interface, void *vif, void *sky
         return me->nativeRequest(true, APPLE80211_IOC_ASSOCIATE, data);
 
     struct apple80211req *req = static_cast<struct apple80211req *>(data);
-    /* the family refused the join: in the envelope form, if it is one (Sonoma's 856 bytes) */
-    if (req->req_type == APPLE80211_IOC_ASSOCIATE) {
-        int e;
-
-        if (me->nativeJoinEnvelope(req, &e))
-            return e;
-    }
     if (req->req_type == APPLE80211_IOC_ASSOCIATE &&
         req->req_len >= sizeof(struct apple80211_assoc_data) && req->req_len <= 64U * 1024U &&
         req->req_data) {
@@ -986,15 +1232,50 @@ int AirPort_RTW89::backIoctlSet(void *ctx, void *interface, void *vif, void *sky
 /*  apple80211Request(): one item, get or set                           */
 /* ------------------------------------------------------------------ */
 
-int AirPort_RTW89::nativeAssociate(void *data)
+/*
+ * A join for a network not heard yet: a phone's hotspot that Instant Hotspot
+ * has only just turned on, which the sliced scans while connected may take
+ * minutes to reach. One scan over every channel, also probing for it by name,
+ * then the caller tries again. The old link is already down (the join left
+ * it), so nothing is slowed. Called with _commandLock held; the scan's end is
+ * seen through rtw89_glue_scanning(), which does not take it. True when the
+ * network was heard.
+ */
+bool RTLAirLink::joinAfterScan(const uint8_t *ssid, uint32_t ssidLen)
+{
+    struct rtw89_glue_bss bss;
+    unsigned int i;
+    int ret, waited;
+
+    for (waited = 0; rtw89_glue_scanning() && waited < 8000; waited += 100)
+        IOSleep(100);
+    _ns->scanInProgress = true;
+    ret = rtw89_glue_scan_for(ssid, ssidLen);
+    if (ret) {
+        _ns->scanInProgress = false;
+        LOG("no scan for the network asked for: %d", ret);
+        return false;
+    }
+    for (waited = 0; rtw89_glue_scanning() && waited < 10000; waited += 100)
+        IOSleep(100);
+    for (i = 0; rtw89_glue_scan_entry(i, &bss, nullptr, 0, nullptr, nullptr); i++)
+        if (bss.ssid_len == ssidLen && !memcmp(bss.ssid, ssid, ssidLen)) {
+            LOG("the network asked for heard after a scan of its own (%u MHz, %d dBm)",
+                bss.freq, bss.signal);
+            return true;
+        }
+    LOG("the network asked for not heard after a scan of its own");
+    return false;
+}
+
+int RTLAirLink::nativeAssociate(void *data)
 {
     struct apple80211_assoc_data *d = static_cast<struct apple80211_assoc_data *>(data);
     static const uint8_t zero[6] = {};
     const uint32_t personal = APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK |
-                              APPLE80211_AUTHTYPE_SHA256_PSK;
+                              APPLE80211_AUTHTYPE_SHA256_PSK | kSaeAuth;
     struct rtw89_glue_link link;
     const uint8_t *bssid, *pmk = nullptr;
-    uint8_t derived[32];
     bool secure, enterprise, fromPassphrase = false;
     int ret;
 
@@ -1020,12 +1301,8 @@ int AirPort_RTW89::nativeAssociate(void *data)
     if (enterprise) {
         /* nothing to check: the keys come later */
     } else if (secure && _ns->joinPassLen) {
-        /* the passphrase itself (macOS sends it so to a card that does SAE):
-         * the pairwise master key is derived here */
-        if (rtw89_glue_derive_pmk(d->ad_ssid, d->ad_ssid_len, (const char *)_ns->joinPass,
-                                  _ns->joinPassLen, derived))
-            return kIOReturnUnsupported;
-        pmk = derived;
+        /* the password itself (macOS sends it so to a card that does SAE):
+         * SAE with it, or the WPA2 pairwise master key derived from it */
         fromPassphrase = true;
     } else if (secure) {
         /* IO80211 hands over the pairwise master key; the 4-way handshake is
@@ -1042,10 +1319,9 @@ int AirPort_RTW89::nativeAssociate(void *data)
     rtw89_glue_link(&link);
     if ((isConnected(link) || isJoining(link)) && strlen(link.ssid) == d->ad_ssid_len &&
         !memcmp(link.ssid, d->ad_ssid, d->ad_ssid_len) &&
-        (!bssid || !memcmp(bssid, link.bssid, 6))) {
+        (!bssid || !memcmp(bssid, link.bssid, 6) || !memcmp(bssid, link.asked_bssid, 6))) {
         /* the same request again while it is being carried out */
         IOLockUnlock(_commandLock);
-        bzero(derived, sizeof(derived));
         return kIOReturnSuccess;
     }
     if (link.state != RTW89_GLUE_LINK_DOWN)
@@ -1060,22 +1336,39 @@ int AirPort_RTW89::nativeAssociate(void *data)
         ret = rtw89_glue_join_ext(d->ad_ssid, d->ad_ssid_len, bssid, ie, ieLen);
         if (ret == -2 && bssid)
             ret = rtw89_glue_join_ext(d->ad_ssid, d->ad_ssid_len, nullptr, ie, ieLen);
+    } else if (fromPassphrase) {
+        const char *pass = (const char *)_ns->joinPass;
+
+        ret = rtw89_glue_join_password(d->ad_ssid, d->ad_ssid_len, bssid, pass, _ns->joinPassLen);
+        if (ret == -2 && bssid)
+            ret = rtw89_glue_join_password(d->ad_ssid, d->ad_ssid_len, nullptr, pass,
+                                           _ns->joinPassLen);
     } else {
         ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, bssid, pmk);
         if (ret == -2 && bssid) /* that access point is not in the list: any of the network's */
             ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, nullptr, pmk);
     }
+    if (ret == -2 && joinAfterScan(d->ad_ssid, d->ad_ssid_len)) {
+        /* heard now: the same join again */
+        if (enterprise)
+            ret = rtw89_glue_join_ext(d->ad_ssid, d->ad_ssid_len, nullptr, nullptr, 0);
+        else if (fromPassphrase)
+            ret = rtw89_glue_join_password(d->ad_ssid, d->ad_ssid_len, nullptr,
+                                           (const char *)_ns->joinPass, _ns->joinPassLen);
+        else
+            ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, nullptr, pmk);
+    }
     IOLockUnlock(_commandLock);
-    bzero(derived, sizeof(derived));
     LOG("join requested by macOS (%s, upper auth 0x%x, %u-byte name): %d",
-        enterprise ? "802.1X" : !secure ? "open" : fromPassphrase ? "WPA2, passphrase" : "WPA2",
+        enterprise ? "802.1X" : !secure ? "open" :
+        (d->ad_auth_upper & kSaeAuth) ? "WPA3, password" : fromPassphrase ? "WPA2, passphrase" : "WPA2",
         d->ad_auth_upper, d->ad_ssid_len, ret);
     if (ret == -2)
         return ENOENT;
     return ret ? kIOReturnError : kIOReturnSuccess;
 }
 
-int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
+int RTLAirLink::nativeRequest(bool isSet, int number, void *data)
 {
     struct rtw89_glue_link link;
 
@@ -1247,6 +1540,9 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
 
     case APPLE80211_IOC_SCAN_REQ:
     case APPLE80211_IOC_SCAN_REQ_MULTIPLE: {
+        uint8_t wantSsid[APPLE80211_MAX_SSID_LEN];
+        uint16_t wantFreqs[APPLE80211_MAX_CHANNELS];
+        size_t wantSsidLen = 0, nWantFreqs = 0;
         int ret;
 
         if (!isSet)
@@ -1255,23 +1551,73 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         if (_ns->scanInProgress)
             return kIOReturnSuccess;
         _ns->scanCursor = 0;
-        if (link.state != RTW89_GLUE_LINK_DOWN) {
+        /*
+         * What was actually asked for. Until now the request was thrown away
+         * and every scan was a wildcard one: macOS says which network and
+         * which channel when it switches a phone's hotspot on, and looking
+         * everywhere instead is both slower and, while connected, liable to
+         * be answered out of the cache below before the hotspot is ever
+         * heard (issue #7).
+         */
+        if (number == APPLE80211_IOC_SCAN_REQ) {
+            const struct apple80211_scan_data *d =
+                static_cast<const struct apple80211_scan_data *>(data);
+            uint32_t n = d->num_channels;
+
+            if (d->ssid_len > 0 && d->ssid_len <= sizeof(wantSsid)) {
+                wantSsidLen = d->ssid_len;
+                memcpy(wantSsid, d->ssid, wantSsidLen);
+            }
+            if (n > APPLE80211_MAX_CHANNELS)
+                n = APPLE80211_MAX_CHANNELS;
+            for (uint32_t i = 0; i < n && nWantFreqs < sizeof(wantFreqs) / sizeof(wantFreqs[0]); i++) {
+                uint16_t freq = (uint16_t)freqOfChannel(d->channels[i].channel,
+                                                        d->channels[i].flags);
+
+                if (freq)
+                    wantFreqs[nWantFreqs++] = freq;
+            }
+        }
+
+        /* RTLAirLink: while an AWDL peer is configured, scans are thinned
+         * like connected ones, so the radio keeps to the peer's windows. A
+         * scan that names a network or channels is still always made. */
+        bool awdlBusy=false;
+        const bool awdlProtected=rtw89_glue_awdl_scan_protect(&awdlBusy);
+        setProperty("OwlyNativeScanProtected",awdlProtected);
+        setProperty("OwlyNativeScanBusy",awdlBusy);
+        if ((link.state != RTW89_GLUE_LINK_DOWN || awdlProtected) && !wantSsidLen && !nWantFreqs) {
             /*
-             * Connected: a real scan at most every kConnectedScanGap, the
-             * firmware going back to the access point's channel in between
-             * (rtw89's hw_scan with the operating channel, as on Linux).
-             * Requests in between, and any while joining, are answered from
-             * what has been heard. Without the real ones a network that comes
-             * up later (a phone's hotspot) never appeared in the list.
+             * Connected (or with a real AWDL peer), and nothing in particular asked for: a real scan at
+             * most every kConnectedScanGap, the firmware going back to the
+             * access point's channel in between (rtw89's hw_scan with the
+             * operating channel, as on Linux). Requests in between, and any
+             * while joining, are answered from what has been heard. Without
+             * the real ones a network that comes up later never appeared in
+             * the list.
+             *
+             * A request that names a network or a channel never comes here:
+             * it is asked for because something is expected to have just
+             * appeared, which is exactly what the cache cannot know about.
              */
-            const uint64_t kConnectedScanGap = 30ULL * 1000 * 1000 * 1000;
             uint64_t now;
 
             absolutetime_to_nanoseconds(mach_absolute_time(), &now);
-            if (!isConnected(link) ||
-                (_ns->lastConnectedScan && now - _ns->lastConnectedScan < kConnectedScanGap)) {
+            const uint64_t frames = (uint64_t)link.tx_frames + link.rx_frames;
+            const bool busy = isConnected(link) &&
+                rtw89_station_scan_busy(now, _ns->scanAskedAt, frames, _ns->scanAskedFrames);
+            _ns->scanAskedAt = now;
+            _ns->scanAskedFrames = frames;
+            if ((link.state!=RTW89_GLUE_LINK_DOWN && !isConnected(link)) ||
+                owly_native_scan_cached(true,awdlProtected && awdlBusy,now,_ns->lastConnectedScan) ||
+                rtw89_station_scan_cached(busy, now, _ns->lastConnectedScan)) {
                 UInt32 result = 0;
-
+                if (busy && !awdlProtected)
+                    setProperty("RTW89ScansHeldBusy", ++_ns->scansHeldBusy, 64);
+                if(awdlProtected) {
+                    setProperty("OwlyNativeScansDeferred",++_ns->awdlScansDeferred,64);
+                    _ns->scanBootstrapTried=true;
+                }
                 nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
                 return kIOReturnSuccess;
             }
@@ -1279,7 +1625,11 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         }
         _ns->scanInProgress = true;
         IOLockLock(_commandLock);
-        ret = rtw89_glue_scan();
+        if (wantSsidLen || nWantFreqs)
+            ret = rtw89_glue_scan_directed(wantSsidLen ? wantSsid : nullptr, wantSsidLen,
+                                           nWantFreqs ? wantFreqs : nullptr, nWantFreqs);
+        else
+            ret = rtw89_glue_scan();
         IOLockUnlock(_commandLock);
         if (ret) {
             _ns->scanInProgress = false;
@@ -1305,10 +1655,32 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         if (isSet)
             return kIOReturnUnsupported;
         *out = nullptr;
+        /*
+         * Strongest first: the menu shows the networks in the order they
+         * come. The order is fixed when reading starts, each network then
+         * looked up by its address (it may have gone meanwhile).
+         */
+        if (_ns->scanCursor == 0) {
+            Scratch listBuf(128 * sizeof(struct rtw89_glue_bss));
+            struct rtw89_glue_bss *list = reinterpret_cast<struct rtw89_glue_bss *>(listBuf.bytes());
+            unsigned int n = list ? rtw89_glue_scan_results(list, 128) : 0;
+
+            for (unsigned int i = 1; i < n; i++) {
+                struct rtw89_glue_bss key = list[i];
+                unsigned int j = i;
+
+                for (; j > 0 && list[j - 1].signal < key.signal; j--)
+                    list[j] = list[j - 1];
+                list[j] = key;
+            }
+            for (unsigned int i = 0; i < n; i++)
+                memcpy(_ns->scanOrder[i], list[i].bssid, 6);
+            _ns->scanOrderLen = n;
+        }
         /* hidden networks have no name to show */
-        while (rtw89_glue_scan_entry(_ns->scanCursor, &bss, ies, 1024, &len, &beaconInt)) {
-            _ns->scanCursor++;
-            if (!bss.ssid_len)
+        while (_ns->scanCursor < _ns->scanOrderLen) {
+            if (!rtw89_glue_find_bss(_ns->scanOrder[_ns->scanCursor++], &bss, ies, 1024, &len,
+                                     &beaconInt) || !bss.ssid_len)
                 continue;
             /* all elements: without HT/VHT/HE ones macOS takes every network
              * for 802.11a/g */
@@ -1325,6 +1697,17 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             int ret;
 
             _ns->scanBootstrapTried = true;
+            bool awdlBusy=false;
+            const bool awdlProtected=rtw89_glue_awdl_scan_protect(&awdlBusy);
+            uint64_t now;
+            absolutetime_to_nanoseconds(mach_absolute_time(), &now);
+            if(owly_native_scan_cached(awdlProtected,awdlBusy,now,_ns->lastConnectedScan)) {
+                setProperty("OwlyNativeScanProtected",awdlProtected);
+                setProperty("OwlyNativeScanBusy",awdlBusy);
+                setProperty("OwlyNativeScansDeferred",++_ns->awdlScansDeferred,64);
+                return 5; /* no new results; do not restart RF scan from GET */
+            }
+            if(awdlProtected)_ns->lastConnectedScan=now;
             _ns->scanInProgress = true;
             IOLockLock(_commandLock);
             ret = rtw89_glue_scan();
@@ -1361,6 +1744,50 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
                        true);
         return kIOReturnSuccess;
     }
+    case kIocBeaconInfo: {
+        BeaconInfo *d = static_cast<BeaconInfo *>(data);
+        struct rtw89_glue_bss bss = {};
+        Scratch iesBuf(1024);
+        uint8_t *ies = iesBuf.bytes();
+        uint16_t beaconInt = 100;
+        size_t len = 0, at = 36, n = 0;
+
+        if (isSet || !d)
+            return kIOReturnUnsupported;
+        if (!isConnected(link))
+            return kIOReturnNotReady;
+        bzero(d, sizeof(*d));
+        if (!ies || !rtw89_glue_find_bss(link.bssid, &bss, ies, 1024, &len, &beaconInt))
+            len = 0;
+        else
+            /* whole elements only, as many as fit */
+            while (n + 2 <= len && n + 2 + ies[n + 1] <= len &&
+                   at + n + 2 + ies[n + 1] <= sizeof(d->frame))
+                n += 2 + ies[n + 1];
+        /* Not in the list any more, or nothing kept of it: the name the
+         * connection knows, which is what the check compares with. */
+        if (!n) {
+            size_t ssidLen = strnlen(link.ssid, 32);
+
+            d->frame[at] = 0;
+            d->frame[at + 1] = (uint8_t)ssidLen;
+            memcpy(d->frame + at + 2, link.ssid, ssidLen);
+            at += 2 + ssidLen;
+        } else {
+            memcpy(d->frame + at, ies, n);
+            at += n;
+        }
+        d->frame[0] = 0x80;                     /* beacon */
+        memset(d->frame + 4, 0xff, 6);          /* broadcast */
+        memcpy(d->frame + 10, link.bssid, 6);
+        memcpy(d->frame + 16, link.bssid, 6);
+        d->frame[32] = (uint8_t)beaconInt;
+        d->frame[33] = (uint8_t)(beaconInt >> 8);
+        d->frame[34] = (uint8_t)bss.capability;
+        d->frame[35] = (uint8_t)(bss.capability >> 8);
+        d->len = (uint32_t)at;
+        return kIOReturnSuccess;
+    }
 
     case APPLE80211_IOC_STATE: {
         struct apple80211_state_data *d = static_cast<struct apple80211_state_data *>(data);
@@ -1386,7 +1813,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         d->version = APPLE80211_VERSION;
         d->channel.version = APPLE80211_VERSION;
         d->channel.channel = channelOfFreq(link.freq);
-        d->channel.flags = channelFlags(d->channel.channel, link.width);
+        d->channel.flags = channelFlags(link.freq, link.width);
         return kIOReturnSuccess;
     }
     case APPLE80211_IOC_BSSID: {
@@ -1523,6 +1950,17 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         d->op_mode = APPLE80211_M_STA;
         return kIOReturnSuccess;
     }
+    case APPLE80211_IOC_HT_CAPABILITY: {
+        /* Legacy configure needs the complete IE to build its own TLV7.
+         * GET154 used to fall through to Unsupported, leaving HT length 0.
+         */
+        if (isSet) return kIOReturnUnsupported;
+        static_assert(sizeof(apple80211_ht_capability)==32,"Legacy GET154 ABI");
+        const int rc=rtw89_glue_awdl_ht_capability(data,sizeof(apple80211_ht_capability));
+        setProperty("OwlyAWDLHTCapabilityResult",static_cast<unsigned long long>(static_cast<uint32_t>(-rc)),32);
+        if (!rc) setProperty("OwlyAWDLHTCapabilityIE",static_cast<uint8_t *>(data)+4,28);
+        return rc ? -rc : kIOReturnSuccess;
+    }
     case APPLE80211_IOC_PHY_MODE: {
         struct apple80211_phymode_data *d = static_cast<struct apple80211_phymode_data *>(data);
 
@@ -1530,11 +1968,13 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             return kIOReturnUnsupported;
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
+        /* every rtw89 chip does 802.11ax. The list ends there: an 802.11be
+         * link is reported as 802.11ax, the family has no bit for it. */
         d->phy_mode = APPLE80211_MODE_11A | APPLE80211_MODE_11B | APPLE80211_MODE_11G |
-                      APPLE80211_MODE_11N | APPLE80211_MODE_11AC;
-        /* Ventura's list ends at 802.11ac: an 802.11ax link is reported as that */
+                      APPLE80211_MODE_11N | APPLE80211_MODE_11AC | APPLE80211_MODE_11AX;
         d->active_phy_mode = link.state == RTW89_GLUE_LINK_DOWN ? APPLE80211_MODE_AUTO :
-                             link.mode >= 2 ? APPLE80211_MODE_11AC :
+                             link.mode >= 3 ? APPLE80211_MODE_11AX :
+                             link.mode == 2 ? APPLE80211_MODE_11AC :
                              link.mode == 1 ? APPLE80211_MODE_11N :
                              link.freq > 3000 ? APPLE80211_MODE_11A : APPLE80211_MODE_11G;
         return kIOReturnSuccess;
@@ -1569,16 +2009,16 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
          * supported" and never sends a WPA3 join, bit 0x10 (76) for picking
          * the SAE key management suite.
          */
-        if (kAdvertiseWPA3)
+        if (advertiseWPA3())
             static_cast<uint8_t *>(d->capabilities)[9] |= 0x08 | 0x10;
         /*
          * Byte 6, bit 0x01 (capability 48): protected management frames.
          * __getMFPCaps tests byte 6 & 0x11, and Apple80211Associate2 takes
          * the SAE suite only from a card that has it, so without it a WPA3
          * network (MFP required) is refused with -3900 before any request
-         * leaves macOS (traced with tools/assoctrace.py).
+         * leaves macOS (traced in IO80211.framework under lldb).
          */
-        if (kAdvertiseWPA3)
+        if (advertiseWPA3())
             d->capabilities[6] |= 0x01;
         return kIOReturnSuccess;
     }
@@ -1632,6 +2072,11 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             if (d->cc[0] != 'x' && d->cc[0] != 'X') {
                 memcpy(_ns->countryCode, d->cc, sizeof(_ns->countryCode));
                 _ns->countryCode[APPLE80211_MAX_CC_LEN - 1] = 0;
+                /* the regulatory domain while not connected: 6 GHz needs one */
+                IOLockLock(_commandLock);
+                rtw89_glue_set_country(reinterpret_cast<const char *>(_ns->countryCode));
+                IOLockUnlock(_commandLock);
+                LOG("country set by macOS: %.2s", _ns->countryCode);
                 nativePost(APPLE80211_M_COUNTRY_CODE_CHANGED, nullptr, 0);
             }
             return kIOReturnSuccess;
@@ -1668,7 +2113,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         for (unsigned int i = 0; i < n; i++) {
             d->supported_channels[i].version = APPLE80211_VERSION;
             d->supported_channels[i].channel = channels[i].channel;
-            d->supported_channels[i].flags = channelFlags(channels[i].channel, 20);
+            d->supported_channels[i].flags = channelFlags(channels[i].freq, 20);
         }
         return kIOReturnSuccess;
     }
@@ -1688,7 +2133,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             d->passive[i] = channels[i].passive;
             d->radar_dfs[i] = channels[i].radar;
             d->support_40Mhz[i] = channels[i].channel != 14;
-            d->support_80Mhz[i] = channels[i].channel > 14;
+            d->support_80Mhz[i] = channels[i].freq > 5000;
             d->chan_spec[i] = channels[i].channel;
         }
         d->num_chan_specs = (uint16_t)n;
@@ -1703,7 +2148,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
         if (number == APPLE80211_IOC_DRIVER_VERSION)
-            snprintf(d->string, sizeof(d->string), "%s (AirPort_RTW89 0.5.0)",
+            snprintf(d->string, sizeof(d->string), "%s (RTLAirLink " RTW89_VERSION_STRING ")",
                      rtw89_chip_name(_deviceID));
         else
             strlcpy(d->string, rtw89_chip_name(_deviceID), sizeof(d->string));
@@ -1846,6 +2291,8 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         return kIOReturnError;
 
     default:
+        if (firstSighting(_ns->seenUnhandled, number))
+            LOG("request %d (%s) is not answered here", number, isSet ? "set" : "get");
         return kIOReturnUnsupported;
     }
 }
@@ -1853,20 +2300,85 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
 
 /* Only invoked for this controller's acknowledged role-6 cookie. The family
  * owns the kernel buffers. No userspace pointer is dereferenced on this path. */
-int AirPort_RTW89::nativeAwdlSyncRequest(bool isSet,int number,void *data)
+int RTLAirLink::nativeAwdlSyncRequest(bool isSet,int number,void *data)
 {
 #if defined(OWLY_AWDL_SOFTWARE_SYNC) && OWLY_AWDL_SOFTWARE_SYNC
     if (!data) return kIOReturnBadArgument;
     /* GET buffers are output: unlike SET, their prior bytes/version are not
      * an input contract. The 0.1.6 frontend initialized GET117 itself. */
     if (isSet) {
-        uint32_t version=0;
-        memcpy(&version,data,sizeof(version));
         if (current_task()!=kernel_task) {
             OwlyEntitlement::Result auth;
             if (!OwlyEntitlement::authorize(current_task(),auth)) return kIOReturnNotPrivileged;
         }
-        if (version!=APPLE80211_VERSION) return kIOReturnBadArgument;
+        uint32_t version=0;
+        memcpy(&version,data,sizeof(version));
+        if (version>APPLE80211_VERSION) return kIOReturnBadArgument;
+    }
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (isSet && (number==APPLE80211_IOC_AWDL_OOB_AUTO_REQUEST ||
+                  number==APPLE80211_IOC_AWDL_OOB_REQUEST)) {
+        // Legacy4C dispatches this buffer only from the internal peer
+        // manager. Both request numbers have empty BSD SET/GET entries.
+        struct MasterIndicationRequest {
+            uint32_t version;
+            uint8_t destination[6], reserved[10];
+            uint16_t subtype;
+            uint8_t options[18];
+            uint16_t length;
+            uint8_t padding[6];
+            const uint8_t *payload;
+        };
+        static_assert(sizeof(MasterIndicationRequest)==56 &&
+                      offsetof(MasterIndicationRequest,subtype)==20 &&
+                      offsetof(MasterIndicationRequest,length)==40 &&
+                      offsetof(MasterIndicationRequest,payload)==48,
+                      "Legacy AWDL MI callback layout");
+        MasterIndicationRequest request;
+        memcpy(&request,data,sizeof(request));
+        const bool automatic=number==APPLE80211_IOC_AWDL_OOB_AUTO_REQUEST;
+        if (request.subtype!=6 || request.length>OWLY_MI_TEMPLATE_MAX)
+            return kIOReturnBadArgument;
+        int rc;
+        if (automatic && !request.length && !request.payload) {
+            rc=-rtw89_glue_awdl_mi(true,request.destination,nullptr,0);
+        } else {
+            if (!request.length ||
+                reinterpret_cast<uintptr_t>(request.payload)<0xffffff8000000000ULL)
+                return kIOReturnBadArgument;
+            Scratch snapshot(request.length);
+            if (!snapshot.p) return kIOReturnNoMemory;
+            memcpy(snapshot.p,request.payload,request.length);
+            rc=-rtw89_glue_awdl_mi(automatic,request.destination,
+                                  snapshot.bytes(),request.length);
+        }
+        setProperty(automatic ? "OwlyNativeMI225Result" : "OwlyNativeMI149Result",
+                    static_cast<unsigned long long>(rc),32);
+        if (!rc && automatic) setProperty("OwlyNativeMI225Bytes",request.length,32);
+        return rc;
+    }
+#endif
+    if (owly_cfg_known(static_cast<unsigned>(number)) &&
+        (number!=APPLE80211_IOC_AWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE || isSet)) {
+        const int rc=-rtw89_glue_awdl_config(isSet,static_cast<unsigned>(number),data);
+        setProperty("OwlyNativeConfigLastRequest",static_cast<unsigned long long>(number),32);
+        setProperty("OwlyNativeConfigLastType",isSet ? 1ULL : 0ULL,32);
+        setProperty("OwlyNativeConfigLastResult",static_cast<unsigned long long>(static_cast<uint32_t>(rc)),32);
+        if (isSet) {
+            const char *key=number==116 ? "OwlyNativeConfigSET116Result" :
+                number==122 ? "OwlyNativeConfigSET122Result" :
+                number==125 ? "OwlyNativeConfigSET125Result" :
+                number==129 ? "OwlyNativeConfigSET129Result" :
+                number==132 ? "OwlyNativeConfigSET132Result" :
+                number==134 ? "OwlyNativeConfigSET134Result" :
+                number==135 ? "OwlyNativeConfigSET135Result" : "OwlyNativeConfigSET213Result";
+            setProperty(key,static_cast<unsigned long long>(static_cast<uint32_t>(rc)),32);
+            if (number==132) {
+                const auto *channel=static_cast<const owly_cfg_u32 *>(data);
+                setProperty("OwlyNativeConfigRequestedMasterChannel",channel->value,32);
+            }
+        }
+        return rc;
     }
     if (number==APPLE80211_IOC_AWDL_SYNC_ENABLED) {
         static_assert(sizeof(apple80211_awdl_sync_enabled)==12,"GET117 ABI");
@@ -1879,13 +2391,23 @@ int AirPort_RTW89::nativeAwdlSyncRequest(bool isSet,int number,void *data)
         int rc=rtw89_glue_awdl_sync_status(&st);
         if (rc) return -rc;
         bzero(d,sizeof(*d)); d->version=APPLE80211_VERSION;
-        /* Report the running software engine, not a requested-only flag. */
-        d->enabled=st.active ? 1u : 0u;
+        /* Keep the configured session enabled across a connected scan. */
+        d->enabled=st.enabled ? 1u : 0u;
+        setProperty("OwlySoftwareAWDLEnabled",st.enabled);
+        setProperty("OwlySoftwareAWDLScanPaused",st.scan_paused);
         setProperty("OwlySoftwareAWDLActive",st.active);
         setProperty("OwlySoftwareAWDLTemplate",st.has_template);
         setProperty("OwlySoftwareAWDLRequested",st.requested);
         setProperty("OwlySoftwareAWDLHandoffs",st.handed_off,64);
         setProperty("OwlySoftwareAWDLFailures",st.failed,64);
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+        setProperty("OwlyNativeMIHandoffs",st.native_mi_handed_off,64);
+#endif
+        setProperty("OwlyNativeConfigMask",st.config_mask,32);
+        setProperty("OwlyNativeConfigMasterChannel",st.master_channel,32);
+        setProperty("OwlyNativeConfigSyncRole",st.sync_role,32);
+        setProperty("OwlyNativeConfigPSFPeriodMS",st.psf_period_ms,32);
+        setProperty("OwlyNativeConfigRSSIDrops",st.rejected_rssi,64);
         return kIOReturnSuccess;
     }
     if (number==APPLE80211_IOC_AWDL_SYNC_FRAME_TEMPLATE) {
@@ -1907,16 +2429,18 @@ int AirPort_RTW89::nativeAwdlSyncRequest(bool isSet,int number,void *data)
         return -rtw89_glue_awdl_sync_template(snapshot.bytes(),d->payload_len);
     }
     if (number==APPLE80211_IOC_AWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE) {
-        static_assert(sizeof(apple80211_awdl_sync_channel_sequence)==400,"GET129 ABI");
-        if (isSet) return kIOReturnUnsupported; // No off-channel scheduling.
+        static_assert(sizeof(owly_cfg_sequence)==400,"GET129 Legacy ABI");
         struct rtw89_glue_awdl_sync_status st={};
         int rc=rtw89_glue_awdl_sync_status(&st);
-        if (rc || !st.active) return rc ? -rc : kIOReturnNotReady;
-        auto *d=static_cast<apple80211_awdl_sync_channel_sequence *>(data);
+        if (rc) return -rc;
+        auto *d=static_cast<owly_cfg_sequence *>(data);
         bzero(d,sizeof(*d)); d->version=APPLE80211_VERSION;
-        d->length=15; d->encoding=0; d->step_count=3;
-        d->duplicate_count=0; d->fill_channel=255;
-        for (unsigned i=0;i<16;i++) d->seqs[i].flags=st.channel;
+        /* GET129 reads configuration during startup, before SET117/151.
+         * Match the reference driver's absent-sequence response: versioned,
+         * zeroed output, with no invented slots or implication of RF activity.
+         * GET117 continues to report the actual engine state independently. */
+        if (!st.enabled) return kIOReturnSuccess;
+        owly_config_sequence(d,st.channel);
         return kIOReturnSuccess;
     }
 #else
@@ -1928,7 +2452,7 @@ int AirPort_RTW89::nativeAwdlSyncRequest(bool isSet,int number,void *data)
 /* Bounded BSD output bridge for the two fixed-size GETs. No user input or
  * embedded pointer is trusted as a kernel pointer. SET/151/service commands
  * stay with the family's existing control path. No radio state changes. */
-bool AirPort_RTW89::nativeAwdlGetEnvelope(void *interface,void *vif,
+bool RTLAirLink::nativeAwdlGetEnvelope(void *interface,void *vif,
                                         unsigned long cmd,void *data,int *result)
 {
 #if defined(OWLY_AWDL_SOFTWARE_SYNC) && OWLY_AWDL_SOFTWARE_SYNC

@@ -28,11 +28,11 @@ def run(source, output, cc=None):
     with tempfile.TemporaryDirectory(prefix='owly-ht-') as folder:
         folder = Path(folder)
         (folder / 'production_ht_glue.inc').write_text(body)
-        native = (source / 'src/kext/AirPortRTW89Native.cpp').read_text()
+        native = (source / 'src/kext/RTLAirLinkNative.cpp').read_text()
         at = native.index('    case APPLE80211_IOC_HT_CAPABILITY: {')
         end = native.index('    case APPLE80211_IOC_PHY_MODE:', at)
         (folder / 'production_native_ht_case.inc').write_text(native[at:end])
-        front = (source / 'src/front/AirPortRTW89Front.cpp').read_text()
+        front = (source / 'src/front/RTLAirLinkFront.cpp').read_text()
         at = front.index('    if (type==SIOCGA80211 &&\n        (number==APPLE80211_IOC_POWER')
         end = front.index('    const bool syncRequest', at)
         (folder / 'production_front_ht_dispatch.inc').write_text(front[at:end])

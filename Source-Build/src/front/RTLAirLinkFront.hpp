@@ -1,16 +1,22 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 /*
- * AirPortRTW89Front: the Wi-Fi device as macOS sees it. See rtw89_front_api.h
+ * RTLAirLinkFront: the Wi-Fi device as macOS sees it. See rtw89_front_api.h
  * for why this is a kext of its own and what it leaves to the driver proper.
- * The IO80211Controller lifecycle follows AirPort_RTW88 (reference/), which
+ * The IO80211Controller lifecycle follows AirPort_RTW88, which
  * follows AirportItlwm.
  */
 #pragma once
 
 #include <IOKit/80211/IO80211Controller.h>
 #include <IOKit/80211/IO80211Interface.h>
+#include <IOKit/80211/IO80211P2PInterface.h>
+#include <IOKit/80211/IO80211VirtualInterface.h>
 #include <IOKit/80211/IO80211WorkLoop.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLocks.h>
+#include <IOKit/IOPlatformExpert.h>
+#include <IOKit/IOUserClient.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
 #include <kern/thread_call.h>
@@ -19,8 +25,8 @@
 
 #include "rtw89_front_api.h"
 
-class AirPortRTW89FrontInterface : public IO80211Interface {
-    OSDeclareDefaultStructors(AirPortRTW89FrontInterface)
+class RTLAirLinkFrontInterface : public IO80211Interface {
+    OSDeclareDefaultStructors(RTLAirLinkFrontInterface)
 
 public:
     /* Received frames are plain Ethernet by the time they get here. IO80211
@@ -30,10 +36,12 @@ public:
                        void *param = 0) override;
 };
 
-class AirPortRTW89Front : public IO80211Controller {
-    OSDeclareDefaultStructors(AirPortRTW89Front)
+class RTLAirLinkFront : public IO80211Controller {
+    OSDeclareDefaultStructors(RTLAirLinkFront)
 
 public:
+    /* One log line into the driver's ring; false if the driver is not there. */
+    bool logLine(const char *line);
     /* IOService */
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
@@ -76,6 +84,9 @@ public:
     bool useAppleRSNSupplicant(IO80211Interface *) override;
     SInt32 apple80211_ioctl(IO80211Interface *interface, IO80211VirtualInterface *vif,
                             ifnet_t net, unsigned long cmd, void *data) override;
+    SInt32 apple80211_ioctl(IO80211SkywalkInterface *skywalk, unsigned long cmd,
+                            void *data) override;
+    SInt32 apple80211_ioctl_set(IO80211SkywalkInterface *skywalk, void *data) override;
     SInt32 apple80211_ioctl_set(IO80211Interface *interface, IO80211VirtualInterface *vif,
                                 IO80211SkywalkInterface *skywalk, void *data) override;
     /* Apple Legacy VIF init/attachToBpf calls the separate VIRTUAL request
@@ -173,7 +184,7 @@ private:
 
     IOPCIDevice *_pci = nullptr;
     IO80211WorkLoop *_workLoop = nullptr;
-    AirPortRTW89FrontInterface *_netif = nullptr;
+    RTLAirLinkFrontInterface *_netif = nullptr;
     const IONetworkMedium *_medium = nullptr;
     IOEthernetAddress _mac = {};
     bool _haveMac = false;

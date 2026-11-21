@@ -25,10 +25,10 @@ def run(source, output, cxx=None):
     cxx = cxx or shutil.which('c++')
     if not cxx:
         raise RuntimeError('A C++ compiler is required')
-    front = (source / 'src/front/AirPortRTW89Front.cpp').read_text()
+    front = (source / 'src/front/RTLAirLinkFront.cpp').read_text()
     glue = (source / 'src/compat_rtw89/rtw89_glue.c').read_text()
-    production_front = extract(front, 'bool AirPortRTW89Front::owlyServiceIoctl(') + '\n'
-    production_front += extract(front, 'int AirPortRTW89Front::owlyServiceIoctlOnGate(') + '\n'
+    production_front = extract(front, 'bool RTLAirLinkFront::owlyServiceIoctl(') + '\n'
+    production_front += extract(front, 'int RTLAirLinkFront::owlyServiceIoctlOnGate(') + '\n'
     production_ready = extract(glue, 'static struct ieee80211_channel *owly_sync_bound_channel(') + '\n'
     old_predicate = 'static struct ieee80211_channel *owly_sync_channel('
     if old_predicate in glue:

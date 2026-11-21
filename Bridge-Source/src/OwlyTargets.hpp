@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 #ifndef OWLY_TARGETS_HPP
 #define OWLY_TARGETS_HPP
 #include <Headers/kern_patcher.hpp>
@@ -12,11 +13,11 @@ static const char *familyPaths[] = {
     "/System/Library/Extensions/IO80211FamilyLegacy.kext/Contents/MacOS/IO80211FamilyLegacy"
 };
 static const char *frontendPaths[] = {
-    "/System/Library/Extensions/AirPortRTW89Front-ABI5EB.kext/Contents/MacOS/AirPortRTW89Front"
+    "/System/Library/Extensions/RTLAirLink.kext/Contents/PlugIns/RTLAirLinkFront.kext/Contents/MacOS/RTLAirLinkFront"
 };
 static KernelPatcher::KextInfo entries[] = {
     {"com.apple.iokit.IO80211FamilyLegacy", familyPaths, 1, {true}, {}, 0},
-    {"com.rtw89.front", frontendPaths, 1, {true}, {}, 0}
+    {"io.github.xnpty.RTLAirLink.front", frontendPaths, 1, {true}, {}, 0}
 };
 
 inline bool kextPath(const char *path)

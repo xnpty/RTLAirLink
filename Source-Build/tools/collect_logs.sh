@@ -2,13 +2,13 @@
 # Collect what a bug report needs, from this boot, into logs/ and one zip to
 # attach:
 #   logs/system.txt      macOS, the machine model, OpenCore, the Wi-Fi card's
-#                        PCI IDs, the kexts loaded, rtw89ctl status (the link,
+#                        PCI IDs, the kexts loaded, rtlairlinkctl status (the link,
 #                        not the list of networks around)
 #   logs/driver.log      the driver's own log ring (everything since it loaded)
 #   logs/kernel.log      the driver's lines in the unified log and dmesg
 #   logs/airportd.log    macOS's Wi-Fi daemon, join-related lines only
 #   logs/panics.txt      the latest panic reports that mention the driver
-#   logs/AirPort_RTW89-report-<date>.zip   all of the above
+#   logs/RTLAirLink-report-<date>.zip   all of the above
 #
 #   sudo tools/collect_logs.sh
 #
@@ -24,7 +24,7 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 out="$here/logs"
 mkdir -p "$out"
 ctl=
-for c in "$here/tools/rtw89ctl" "$here/build/out/rtw89ctl"; do
+for c in "$here/tools/rtlairlinkctl" "$here/build/out/rtlairlinkctl"; do
     [ -x "$c" ] && { ctl="$c"; break; }
 done
 
@@ -69,12 +69,12 @@ start="$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')"
     echo "== kexts"
     kmutil showloaded 2>/dev/null | grep -iE "rtw89|IO80211|Skywalk|AMFIPass|Lilu|Bluetooth|Realtek" || true
     echo
-    echo "== rtw89ctl status"
+    echo "== rtlairlinkctl status"
     if [ -n "$ctl" ]; then
         # the link only: the networks around are left out
         "$ctl" status 2>&1 | sed '/network(s)$/,$d'
     else
-        echo "rtw89ctl not found"
+        echo "rtlairlinkctl not found"
     fi
 } 2>&1 | mask > "$out/system.txt"
 
@@ -82,22 +82,22 @@ if [ -n "$ctl" ]; then "$ctl" log 2>&1 | mask > "$out/driver.log" || true; else 
 {
     echo "== unified log"
     /usr/bin/log show --start "$start" --style compact \
-        --predicate 'process == "kernel" AND (sender == "AirPort_RTW89" OR sender == "AirPortRTW89Front" OR eventMessage CONTAINS "AirPort_RTW89" OR eventMessage CONTAINS "AirPortRTW89" OR eventMessage CONTAINS "[rtw89")' 2>/dev/null
+        --predicate 'process == "kernel" AND (sender == "RTLAirLink" OR sender == "RTLAirLinkFront" OR eventMessage CONTAINS "RTLAirLink" OR eventMessage CONTAINS "RTLAirLink" OR eventMessage CONTAINS "[rtw89")' 2>/dev/null
     # IOLog always reaches the kernel's message buffer; loaded from the EFI,
     # the driver's lines have not been reaching the unified log at all
     echo "== dmesg"
-    dmesg 2>/dev/null | grep -E "AirPort_RTW89|AirPortRTW89|rtw89" || true
+    dmesg 2>/dev/null | grep -E "RTLAirLink|RTLAirLink|rtw89" || true
 } | mask > "$out/kernel.log"
 /usr/bin/log show --start "$start" --style compact \
     --predicate 'process == "airportd" AND (eventMessage CONTAINS[c] "join" OR eventMessage CONTAINS[c] "assoc" OR eventMessage CONTAINS[c] "fail")' \
     2>/dev/null | mask > "$out/airportd.log" || true
 : > "$out/panics.txt"
 for p in $(ls -t /Library/Logs/DiagnosticReports/*.panic 2>/dev/null | head -5); do
-    grep -qiE "rtw89|AirPortRTW89" "$p" || continue
+    grep -qiE "rtw89|RTLAirLink" "$p" || continue
     { echo "== $p"; mask < "$p"; echo; } >> "$out/panics.txt"
 done
 
-zip="$out/AirPort_RTW89-report-$(date '+%Y%m%d-%H%M').zip"
+zip="$out/RTLAirLink-report-$(date '+%Y%m%d-%H%M').zip"
 (cd "$out" && zip -q "$zip" system.txt driver.log kernel.log airportd.log panics.txt)
 owner="$(stat -f %u "$here")"
 chown -R "$owner" "$out"

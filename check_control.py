@@ -18,8 +18,8 @@ def run(source,output,compiler=None):
         selected=subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],text=True).strip()
         if not Path(selected).is_dir():raise RuntimeError('macOS SDK unavailable')
         sdk=['-isysroot',selected];(output/'sdk.txt').write_text(selected+'\n')
-    text=(source/'src/kext/AirPortRTW89Native.cpp').read_text()
-    old=(ROOT/'baseline/src/kext/AirPortRTW89Native.cpp').read_text()
+    text=(source/'src/kext/RTLAirLinkNative.cpp').read_text()
+    old=(ROOT/'baseline/src/kext/RTLAirLinkNative.cpp').read_text()
     sdktext=(source/'third_party/MacKernelSDK/Headers/IOKit/80211/apple80211_ioctl.h').read_text()
     wire='#define IFNAMSIZ 16\nusing u_int32_t=uint32_t;\n'
     for name in ['SIOCSA80211','SIOCGA80211','APPLE80211_VERSION','APPLE80211_AWDL_MAX_CHANNELS_ABI',
@@ -34,8 +34,8 @@ def run(source,output,compiler=None):
         if platform.system()=='Linux':env['ASAN_OPTIONS']='detect_leaks=0'
         for mode in ['baseline_repro','normal','asan_ubsan']:
             code=old if mode=='baseline_repro' else text
-            methods=extract(code,'struct Scratch')+';\n'+extract(code,'static int errnoOf(')+'\n'+extract(code,'int AirPort_RTW89::nativeAwdlSyncRequest(')+'\n'
-            methods+=extract(code,'bool AirPort_RTW89::nativeAwdlGetEnvelope(')+'\n'
+            methods=extract(code,'struct Scratch')+';\n'+extract(code,'static int errnoOf(')+'\n'+extract(code,'int RTLAirLink::nativeAwdlSyncRequest(')+'\n'
+            methods+=extract(code,'bool RTLAirLink::nativeAwdlGetEnvelope(')+'\n'
             (temp/'production_methods.inc').write_text(methods)
             flags=['-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer'] if mode=='asan_ubsan' else ['-O2']
             if mode=='asan_ubsan' and platform.system()=='Linux':flags.append('-no-pie')

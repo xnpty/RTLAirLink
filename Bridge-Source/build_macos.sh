@@ -77,7 +77,7 @@ build_main() (
         -O2 -fno-strict-aliasing -fwrapv -mkernel -fno-exceptions
         -fno-builtin -fno-common -fno-stack-protector -fno-omit-frame-pointer
         -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -D__PRIVATE_SPI__
-        -DPRODUCT_NAME=OwlyAirLinkBridge -DMODULE_VERSION="$RELEASE_VERSION" -DLILU_CUSTOM_KMOD_INIT=1 -DLILU_CUSTOM_IOKIT_INIT=1
+        -DPRODUCT_NAME=RTLAirBridge -DMODULE_VERSION="$RELEASE_VERSION" -DLILU_CUSTOM_KMOD_INIT=1 -DLILU_CUSTOM_IOKIT_INIT=1
         -Wall -Wextra -Wframe-larger-than=1024)
     CXX=(-std=gnu++17 -fapple-kext -fno-rtti)
     OBJS="$OUT_DIR/objects"
@@ -97,7 +97,7 @@ build_main() (
     echo "BUILDING: kmod_info.c"
     "$CLANG" "${COMMON[@]}" -std=gnu11 -c src/kmod_info.c -o "$OBJS/kmod.o"
 
-    BUNDLE="$OUT_DIR/UNQUALIFIED_DO_NOT_INSTALL/OwlyAirLinkBridge.kext"
+    BUNDLE="$OUT_DIR/UNQUALIFIED_DO_NOT_INSTALL/RTLAirBridge.kext"
     mkdir -p "$BUNDLE/Contents/MacOS"
     cp Info.plist "$BUNDLE/Contents/Info.plist"
     cp LICENSE "$OUT_DIR/UNQUALIFIED_DO_NOT_INSTALL/LICENSE-Owly-GPL2.txt"
@@ -109,17 +109,17 @@ build_main() (
     "$CLANGXX" -arch x86_64 -mmacosx-version-min=13.0 -isysroot "$MACOS_SDK" \
         -nostdlib -Xlinker -kext -L "$MKSDK/Library/x86_64" \
         "$OBJS/core.o" "$OBJS/plugin.o" "$OBJS/bootstrap.o" "$OBJS/service.o" "$OBJS/status.o" "$OBJS/start.o" "$OBJS/kmod.o" \
-        -lkmod -o "$BUNDLE/Contents/MacOS/OwlyAirLinkBridge"
+        -lkmod -o "$BUNDLE/Contents/MacOS/RTLAirBridge"
     /usr/bin/plutil -lint "$BUNDLE/Contents/Info.plist"
     /usr/bin/codesign --force --sign - --timestamp=none "$BUNDLE"
     /usr/bin/codesign --verify --deep --strict --verbose=2 "$BUNDLE"
-    xcrun dwarfdump --uuid "$BUNDLE/Contents/MacOS/OwlyAirLinkBridge" \
+    xcrun dwarfdump --uuid "$BUNDLE/Contents/MacOS/RTLAirBridge" \
         > "$OUT_DIR/report/candidate-uuid.txt"
-    xcrun nm -u "$BUNDLE/Contents/MacOS/OwlyAirLinkBridge" \
+    xcrun nm -u "$BUNDLE/Contents/MacOS/RTLAirBridge" \
         > "$OUT_DIR/report/undefined-symbols.txt"
-    xcrun nm -g "$BUNDLE/Contents/MacOS/OwlyAirLinkBridge" \
+    xcrun nm -g "$BUNDLE/Contents/MacOS/RTLAirBridge" \
         > "$OUT_DIR/report/exported-symbols.txt"
-    /usr/bin/shasum -a 256 "$BUNDLE/Contents/MacOS/OwlyAirLinkBridge" \
+    /usr/bin/shasum -a 256 "$BUNDLE/Contents/MacOS/RTLAirBridge" \
         > "$OUT_DIR/report/candidate-sha256.txt"
     cp SOURCE_SHA256.json VENDOR_PROVENANCE.json SDK_LOCK.json "$OUT_DIR/report/"
     cp collect_runtime.sh "$OUT_DIR/collect_runtime.sh"

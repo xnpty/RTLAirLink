@@ -40,6 +40,8 @@ def run(source, output, cc=None):
         'rtw89_build_txwd_info4', 'rtw89_build_txwd_body0',
         'rtw89_build_txwd_body2', 'rtw89_build_txwd_body3')]
     submit = extract_function(glue, 'owly_sync_submit')
+    if 'owly_awdl_away(' in submit:
+        submit = extract_function(glue, 'owly_awdl_away') + '\n\n' + submit
     compiler = cc or shutil.which('cc')
     sdk = []
     if platform.system() == 'Darwin':

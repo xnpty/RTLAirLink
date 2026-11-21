@@ -108,7 +108,7 @@ struct Loop {
         bool prior=gated;gated=true;int result=action(owner,arg,nullptr,nullptr,nullptr);gated=prior;return result;
     }
 };
-class AirPortRTW89Front:public OSObject {
+class RTLAirLinkFront:public OSObject {
 public:
 #include "native_class_declarations.inc"
     void owlyNativeCapture(IO80211VirtualInterface *,IO80211PeerManager *);
@@ -136,7 +136,7 @@ public:
 extern "C" unsigned char bufout[0x420]={};
 static std::mutex actionMutex;static std::condition_variable actionCondition;
 static bool blockAction=false,enteredAction=false,releaseAction=false,reenterStop=false;
-static AirPortRTW89Front *activeFront=nullptr;
+static RTLAirLinkFront *activeFront=nullptr;
 static std::vector<uint8_t> lastBody,lastMetadata,lastData,lastWindow;
 static bool rejectNativeAction=false;
 
@@ -247,7 +247,7 @@ extern "C" void owly_peer_window(void *,unsigned code,void *data,unsigned long n
 static unsigned checks;
 #define CHECK(x) do {++checks;assert(x);}while(0)
 struct Fixture {
-    AirPortRTW89Front front;IO80211VirtualInterface vif;IO80211PeerManager peer;IOLock lock;Loop loop;
+    RTLAirLinkFront front;IO80211VirtualInterface vif;IO80211PeerManager peer;IOLock lock;Loop loop;
     Fixture(){nativeEntries.clear();normalNativeCreatesPeer=true;nativeAddFails=false;nativeAddWrongMAC=false;nativeGenericDefault=false;nativeAddCalls=0;
         front._owlyVifLock=&lock;front._workLoop=&loop;peer.peer=true;activeFront=&front;modelNativePeer=&peer;
         auto *pointer=&peer;memcpy(reinterpret_cast<uint8_t *>(&vif)+OWLY_NATIVE_VIF_PEER_OFFSET,&pointer,sizeof(pointer));
@@ -257,7 +257,7 @@ struct Fixture {
         memcpy(reinterpret_cast<uint8_t *>(&peer)+OWLY_NATIVE_PEER_OWN_MAC_OFFSET,front.testWindow.local,6);
         memcpy(front.testWindow.master,front.testWindow.local,6);
         front._back.ctx=&front;
-        front._back.native_window=[](void *p,struct owly_link_window *out){auto *f=static_cast<AirPortRTW89Front *>(p);*out=f->testWindow;return f->readyResult;};
+        front._back.native_window=[](void *p,struct owly_link_window *out){auto *f=static_cast<RTLAirLinkFront *>(p);*out=f->testWindow;return f->readyResult;};
         front._back.native_output=[](void *,mbuf_t m)->uint32_t {mbuf_freem(m);return kIOReturnOutputSuccess;};
         CHECK(front.owlyNativeStart());front.owlyNativeCapture(&vif,&peer);
         front._owlyAirlink.cookie=&vif;front._owlyAirlink.enabled=true;

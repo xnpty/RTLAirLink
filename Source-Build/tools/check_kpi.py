@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check that every symbol a built kext imports is exported by a library it declares.
 
-Usage: python3 tools/check_kpi.py build/out/AirPort_RTW89.kext
+Usage: python3 tools/check_kpi.py build/out/RTLAirLink.kext
 
 `kmutil libraries -p` reports, for each undefined symbol it can place, the KPI
 that exports it. Anything it does not report would fail at load time with

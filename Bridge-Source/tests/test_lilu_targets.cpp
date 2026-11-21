@@ -20,7 +20,7 @@ int main()
 {
     const size_t count = sizeof(OwlyTargets::entries) / sizeof(OwlyTargets::entries[0]);
     assert(count == 2 && OwlyTargets::valid(OwlyTargets::entries, count));
-    assert(std::strcmp(OwlyTargets::entries[1].id, "com.rtw89.front") == 0);
+    assert(std::strcmp(OwlyTargets::entries[1].id, "io.github.xnpty.RTLAirLink.front") == 0);
     assert(OwlyTargets::entries[1].pathNum == 1 && OwlyTargets::entries[1].paths[0]);
     guardedConsumer(OwlyTargets::entries, count);
     assert(consumerCalls == 2);

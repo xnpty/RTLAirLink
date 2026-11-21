@@ -33,6 +33,9 @@ struct rtw89_cfg80211_rdev {
 
     struct regulatory_request reg_request;
     struct work_struct reg_work;        /* delivers reg_request to wiphy->reg_notifier */
+    char base_alpha2[2];                /* macOS's country, "00" until it says;
+                                         * an AP's Country element goes over it */
+    bool ie_country;                    /* an AP's country is in force */
 
     /* Owned world-NO_IR lease; wiphy channel storage, not borrowed chanctx.
      * All inspection and changes are under the wiphy mutex. */
@@ -50,10 +53,14 @@ static inline struct rtw89_cfg80211_rdev *wiphy_to_rdev(struct wiphy *wiphy)
 /* The access point's country (its Country element) while connected, or
  * NULL once not: rtw89's TX power tables follow it. */
 void rtw89_cfg80211_country_ie(struct wiphy *wiphy, const u8 *alpha2);
+void rtw89_cfg80211_set_country(struct wiphy *wiphy, const char *alpha2);
 bool rtw89_cfg80211_link_beacon(struct wiphy *wiphy,
                               struct ieee80211_channel *channel,
                               const u8 bssid[6], const u8 source[6], u16 capability);
 bool rtw89_cfg80211_link_beacon_reset(struct wiphy *wiphy);
+/* AWDL on a world-NO_IR social channel (5220/5745): allowed once a real
+ * country is in force (the AP's or macOS's) whose rules permit it. */
+bool rtw89_cfg80211_awdl_5g_ok(struct wiphy *wiphy, u32 freq);
 
 /* ------------------------------------------------------------------ */
 /*  mac80211 side: what Linux keeps in ieee80211_local / sdata / sta    */
@@ -234,7 +241,7 @@ struct rtw89_mlme_status {
     int last_error;             /* errno, or -(802.11 status/reason code) - 1000 */
     u32 eapol_rx;               /* EAPOL frames received from the AP */
     u16 tx_ba, rx_ba;           /* TID bits: BlockAck sessions in each direction */
-    u8 width;                   /* MHz */
+    u16 width;                  /* MHz */
     u16 center_freq;            /* MHz, of the whole channel */
     u8 mode;                    /* 0: 802.11a/b/g, 1: n, 2: ac, 3: ax */
     u8 nss;                     /* spatial streams towards the AP */
@@ -247,6 +254,8 @@ struct rtw89_mlme_status {
 };
 
 /* All of these are called with the wiphy mutex held, except rtw89_mlme_rx(). */
+/* Called (wiphy lock held) before the link is torn down. */
+void rtw89_mlme_set_offchan_hook(void (*end)(void));
 /* @notify is called (under the wiphy mutex) whenever the state changes. */
 /* OWLY_CORE04D_SHARED_CHANCTX: internal MLME shim, stage only. */
 #if defined(RTW89_AWDL_VIF_STAGE) && RTW89_AWDL_VIF_STAGE
@@ -261,7 +270,8 @@ void rtw89_mlme_awdl_release_channel(void);
 void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif, void (*notify)(void));
 void rtw89_mlme_stop(void);
 /* @pmk: the 32-byte pairwise master key for a WPA2-PSK network, else NULL. */
-int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk);
+int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk,
+                       const u8 *password, size_t password_len);
 int rtw89_mlme_connect_ext(const struct rtw89_mlme_bss *bss, const u8 *rsn_ie, size_t rsn_len);
 int rtw89_mlme_set_key(bool pairwise, int idx, const u8 *key, size_t len, u64 rsc);
 int rtw89_mlme_set_pmk(const u8 *pmk, size_t len);

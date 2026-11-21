@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* RTLAirLink names and module metadata updated 2026-11-21. */
 /* EB1 kernel integration candidate. Native compile/runtime qualification pending.
- * No activation without -owlyeb1, exact family UUID and both entry fingerprints.
+ * Active by default (-owlyeb1off disables); needs the exact family UUID and both entry fingerprints.
  */
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
@@ -124,7 +125,7 @@ bool scopeMatches(IOService *vif, char name[16], uint32_t *reason = nullptr)
     if (reason) *reason = 4;
     IOService *provider = vif;
     for (unsigned depth = 0; provider && depth < 8; depth++, provider = provider->getProvider()) {
-        if (provider->metaCast("AirPortRTW89Front")) {
+        if (provider->metaCast("RTLAirLinkFront")) {
             if (reason) *reason = 5;
             const auto *ready = OSDynamicCast(OSNumber, provider->getProperty("OWLY C2 native_vif_ready"));
             found = ready && ready->unsigned32BitValue() == 1;
@@ -363,7 +364,7 @@ IOReturn hookedOpen(IOService *vif, task_t task, void *securityID, UInt32 type,
          * UUIDs, method prefixes, native table and the real entitled client. */
         IOService *provider=vif;
         for(unsigned depth=0;provider && depth<8;depth++,provider=provider->getProvider()) {
-            if(provider->metaCast("AirPortRTW89Front")) {
+            if(provider->metaCast("RTLAirLinkFront")) {
                 provider->setProperty("OwlyNativeABIReady",true);
                 break;
             }
@@ -893,8 +894,8 @@ void loaded(void *, KernelPatcher &patcher, size_t id, mach_vm_address_t address
 void startPlugin()
 {
     OwlyStatus::flag("OwlyEB1PluginStartReached", true);
-    if (!checkKernelArgument("-owlyeb1") || !owlyStartupPlan.registrationAllowed()) {
-        IOLog("OwlyEB1: source candidate is opt-in; -owlyeb1 absent, inactive\n");
+    if (checkKernelArgument("-owlyeb1off") || !owlyStartupPlan.registrationAllowed()) {
+        IOLog("OwlyEB1: -owlyeb1off or no valid stage, inactive\n");
         return;
     }
     /* The loader phase registers callbacks only. The matched IOKit service

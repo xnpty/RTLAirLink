@@ -22,6 +22,7 @@ struct owly_link_peer {
     uint8_t election[24];
     int8_t rssi;
     uint16_t next_seq, consistent;
+    uint8_t outliers;  /* samples ignored in a row while the clock held */
     uint64_t last_rx_us, clock_rx_us, anchor_us, last_mif_rx_us, last_data_rx_us;
 };
 /* Data keeps the peer alive, never its separately aged action clock. */
@@ -67,6 +68,8 @@ struct owly_native_link {
     uint32_t queue_used;
     uint64_t actions, rejected_actions, data_rx_admitted, data_rx_rejected;
     uint64_t tx_enqueued, tx_handoffs, tx_refused, tx_expired, tx_radio_acked;
+    /* Why a peer's clock was or was not taken: diagnostics only. */
+    uint64_t clock_not_root, clock_no_countdown, clock_outlier, clock_reset, clock_ok;
 };
 void owly_link_reset(struct owly_native_link *s);
 void owly_link_reconcile(struct owly_native_link *s,bool active,
@@ -101,6 +104,11 @@ bool owly_link_root_election(struct owly_native_link *s,uint64_t now,
                               uint8_t root[24]);
 /* Shared slots in the followed clock's timing domain, on the associated channel. */
 uint16_t owly_link_shared_slots(struct owly_native_link *s, uint64_t now);
+/* Multichannel: the advertised clock (followed root, else local) and the
+ * slots in which that root's domain is on our channel, ignoring the TX pause.
+ * Returns true when following a root. */
+bool owly_link_clock(struct owly_native_link *s,uint64_t now,uint16_t *seq,
+                     uint32_t *phase_us,uint16_t *social_slots,unsigned *peers);
 /* Accept IPv6 Ethernet and Apple's wrapped 802.3 frames. Preserve the
  * IPv6 payload and write the supplied on-air sequence and AWDL head. */
 int owly_link_build_tx(const uint8_t *eth,size_t len,const uint8_t local[6],
@@ -121,4 +129,7 @@ void owly_link_prefer(struct owly_native_link *s,const uint8_t master[6]);
 /* Idle radio policy: follow the most common channel of a real fresh root;
  * otherwise return the discovery channel. The caller validates RF limits. */
 uint8_t owly_link_follow_channel(struct owly_native_link *s,uint64_t now);
+/* The social channel fresh peers' own sequences use most; 0 if unknown. */
+uint8_t owly_link_peer_channel(struct owly_native_link *s,uint64_t now);
+uint8_t owly_link_data_channel(struct owly_native_link *s,uint64_t now);
 #endif

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* RTLAirLink integration and release changes dated 2026-11-21. */
 #ifndef OWLY_AWDL_BA_H
 #define OWLY_AWDL_BA_H
 #include <stdbool.h>
@@ -48,7 +49,7 @@ static inline size_t owly_ba_response(const uint8_t request[33],const uint8_t ow
 }
 /* Caller serializes; callbacks queue ownership transfers, never input/free under its lock. */
 typedef void (*owly_ba_emit)(void *ctx,void *packet);
-struct owly_ba_ring {bool active;uint16_t head,index,size,stored;void *slots[64];uint64_t arrived[64];};
+struct owly_ba_ring {bool active,started;uint16_t head,index,size,stored;void *slots[64];uint64_t arrived[64];};
 static inline void owly_ba_advance(struct owly_ba_ring *s,owly_ba_emit emit,void *ctx)
 {
  if(s->slots[s->index]){emit(ctx,s->slots[s->index]);s->slots[s->index]=NULL;s->arrived[s->index]=0;--s->stored;}
@@ -68,7 +69,13 @@ static inline void owly_ba_push(struct owly_ba_ring *s,uint16_t sn,void *packet,
 {
  if(!s->active){emit(ctx,packet);return;}
  sn&=4095u;unsigned delta=(sn-s->head)&4095u;
- if(delta>=2048u){drop(ctx,packet);return;}
+ if(delta>=2048u){
+  /* Data sent before the first MPDU in the BA window still uses normal RX. */
+  if(s->started)drop(ctx,packet);
+  else emit(ctx,packet);
+  return;
+ }
+ s->started=true;
  while(delta>=s->size){owly_ba_advance(s,emit,ctx);--delta;}
  const unsigned at=(s->index+delta)%s->size;
  if(s->slots[at]){drop(ctx,packet);return;}

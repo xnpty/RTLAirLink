@@ -52,7 +52,7 @@ struct IO80211Controller:OSObject {
         assert(lock_depth==0);++parent_calls;if(on_parent)on_parent();return parent_error;
     }
 };
-struct AirPortRTW89Front:IO80211Controller {
+struct RTLAirLinkFront:IO80211Controller {
     struct OwlyServiceCall {IO80211Interface*interface;IO80211VirtualInterface*vif;ifnet_t net;unsigned long command;void*envelope;int result;};
     void *_owlyVifLock=this;
     IOWorkLoop *_workLoop=nullptr;
@@ -74,7 +74,7 @@ struct AirPortRTW89Front:IO80211Controller {
 #include "production.inc"
 #endif
 struct World {
-    AirPortRTW89Front front;
+    RTLAirLinkFront front;
     IOWorkLoop loop;
     IO80211VirtualInterface vif,other;
     apple80211req req;

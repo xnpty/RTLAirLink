@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* RTLAirLink integration and release changes dated 2026-11-21. */
 /*
  * Boundary between the platform (the IOKit kext, or the host smoke test) and
  * everything Linux-shaped. This header is plain C with no Linux types, so the
@@ -186,6 +187,11 @@ struct rtw89_glue_awdl_sync_status {
     uint32_t config_mask, master_channel, sync_role, psf_period_ms, election_id;
     int32_t peer_rssi;
     uint64_t rejected_rssi;
+    /* Multichannel AWDL: associated off the social channels, AWDL on ch 6
+     * in the slots below; visits counts trips there. */
+    bool mc_enabled, mc_present;
+    uint16_t mc_slots;
+    uint64_t mc_visits, mc_null_failures, mc_max_switch_us;
 };
 int rtw89_glue_awdl_config(bool set, unsigned number, void *data);
 int rtw89_glue_awdl_ht_capability(void *output, size_t capacity);
@@ -194,6 +200,8 @@ int rtw89_glue_awdl_sync_template(const uint8_t *bytes, size_t length);
 int rtw89_glue_awdl_mi(bool automatic, const uint8_t destination[6],
                        const uint8_t *bytes, size_t length);
 int rtw89_glue_awdl_vif_disable(void);
+int rtw89_glue_awdl_rx_sample_start(const uint8_t peer[6]);
+void rtw89_glue_awdl_rx_sample_stop(void);
 #endif
 int rtw89_glue_awdl_sync_enable(bool enabled);
 int rtw89_glue_awdl_sync_status(struct rtw89_glue_awdl_sync_status *out);
@@ -209,6 +217,18 @@ bool rtw89_glue_awdl_service_ready(void);
  * already running, -ENETDOWN if the radio is down.
  */
 int rtw89_glue_scan(void);
+
+/*
+ * The same over every channel also while connected (no slice), probing for
+ * @ssid by name as well as with the wildcard: for a join whose network has
+ * not been heard yet.
+ */
+int rtw89_glue_scan_for(const uint8_t *ssid, size_t ssid_len);
+
+/* A scan macOS asked for by name and/or by channel (frequencies in MHz).
+ * Never sliced and never answered from an earlier scan. */
+int rtw89_glue_scan_directed(const uint8_t *ssid, size_t ssid_len,
+                             const uint16_t *freqs, size_t n_freqs);
 bool rtw89_glue_scanning(void);
 
 struct rtw89_glue_bss {
@@ -220,8 +240,8 @@ struct rtw89_glue_bss {
     int8_t   signal;            /* dBm */
     uint16_t capability;
     uint32_t seen;              /* beacons and probe responses heard */
-    uint8_t  mode;              /* 0: 802.11a/b/g, 1: n, 2: ac, 3: ax */
-    uint8_t  width;             /* MHz the AP operates on */
+    uint8_t  mode;              /* 0: 802.11a/b/g, 1: n, 2: ac, 3: ax, 4: be */
+    uint16_t width;             /* MHz the AP operates on */
     uint8_t  security;          /* RTW89_GLUE_SEC_* bits; 0: open */
 };
 
@@ -297,6 +317,11 @@ size_t rtw89_glue_assoc_rsn_ie(uint8_t *buf, size_t max);
  * open network), and optionally one access point picked by @bssid. */
 int rtw89_glue_join_pmk(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
                         const uint8_t *pmk);
+/* The same with the network's password itself: WPA3-Personal (SAE) where the
+ * network offers it, else WPA2-PSK with the key derived from it. */
+#define RTW89_GLUE_MAX_PASSWORD 64
+int rtw89_glue_join_password(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
+                             const char *password, size_t password_len);
 /* WPA2-PSK's pairwise master key from the network's name and its passphrase
  * (8-63 characters, or the key itself as 64 hex digits). -EACCES if the
  * passphrase is not one. */
@@ -317,16 +342,17 @@ struct rtw89_glue_rate {
     uint8_t  mode;                  /* 0: 802.11a/b/g, 1: 802.11n, 2: 802.11ac, 3: 802.11ax */
     uint8_t  mcs;                   /* the rate's index within its mode and stream count */
     uint8_t  nss;                   /* spatial streams */
-    uint8_t  width;                 /* MHz */
+    uint16_t width;                 /* MHz */
 };
 
 struct rtw89_glue_link {
     enum rtw89_glue_link_state state;
     uint8_t  bssid[6];
+    uint8_t  asked_bssid[6];        /* the one macOS asked for, if another was joined */
     char     ssid[33];
     uint16_t freq;
     uint16_t aid;
-    uint8_t  width;                 /* channel width in MHz */
+    uint16_t width;                 /* channel width in MHz */
     uint16_t center_freq;           /* centre of the whole channel, MHz */
     uint8_t  mode;                  /* 0: 802.11a/b/g, 1: 802.11n, 2: 802.11ac, 3: 802.11ax */
     uint8_t  nss;                   /* spatial streams */
@@ -405,6 +431,15 @@ void rtw89_glue_set_ppdu_flush(bool on);
 void rtw89_glue_set_rejoin(bool on);
 
 /*
+ * A received frame's hardware arrival time, moved into the clock the driver
+ * keeps time with. False until an offset between the two has been measured.
+ * Only meaningful for a frame whose status carried RX_FLAG_MACTIME_START.
+ */
+bool rtw89_glue_rx_local_us(uint64_t mactime, uint64_t *local_us);
+
+/* Called from inside the compat layer when one arrives. */
+
+/*
  * For testing on the real card. rtw89_glue_probe_ap() acts as if the driver
  * had reported missed beacons: the AP is probed, and the connection given up
  * if it does not acknowledge. rtw89_glue_drop() acts as if the connection
@@ -419,6 +454,10 @@ void rtw89_glue_drop(void);
  * do not get on with this card's 802.11ax.
  */
 void rtw89_glue_set_ax(bool on);
+/* The country macOS says the machine is in (two letters): the regulatory
+ * domain when no access point's Country element is in force. 6 GHz, which
+ * rtw89 keeps off in the world domain, needs one. */
+void rtw89_glue_set_country(const char *alpha2);
 
 /*
  * Transmit one Ethernet frame (destination, source, type, payload; no FCS) of

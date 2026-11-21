@@ -5,33 +5,33 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>OwlyAirLinkBridge</string>
+	<string>RTLAirBridge</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.owly.airlink.eventbridge</string>
+	<string>io.github.xnpty.RTLAirLink.bridge</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>RTLAirBridge</string>
 	<key>CFBundleDisplayName</key>
-	<string>RTLAirBridge</string>
+	<string>RTLAirLink AirDrop Bridge</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>OSBundleRequired</key>
 	<string>Root</string>
 	<key>IOKitPersonalities</key>
 	<dict>
-		<key>OwlyAirLinkBridge</key>
+		<key>RTLAirBridge</key>
 		<dict>
 			<key>CFBundleIdentifier</key>
-			<string>com.owly.airlink.eventbridge</string>
+			<string>io.github.xnpty.RTLAirLink.bridge</string>
 			<key>IOClass</key>
-			<string>OwlyAirLinkBridge</string>
+			<string>RTLAirBridge</string>
 			<key>IOMatchCategory</key>
-			<string>OwlyAirLinkBridge</string>
+			<string>RTLAirBridge</string>
 			<key>IOProviderClass</key>
 			<string>IOResources</string>
 			<key>IOResourceMatch</key>

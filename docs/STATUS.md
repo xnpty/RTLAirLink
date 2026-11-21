@@ -1,15 +1,11 @@
-# Validation status
+# RTLAirLink 0.2.0 verification
 
-## Research baseline
+The working source was tested on RTL8852BE with macOS Tahoe 25G241 and OpenCore 1.0.9, with Bluetooth configured separately.
 
-Earlier development testing completed file transfers in both directions over real AWDL in development testing. Waiting and disappearing discovery targets recurred; that result is not a stability qualification.
+- Mac to iPhone completed six of eight AirDrop sends through IPv6 on awdl0. Five of those sends completed the Companion exchanges on AWDL.
+- iPhone to Mac received a 922,428-byte image over QUIC on awdl0. The saved image matched the original SHA-256.
+- Two outbound attempts stopped at missingEndpoint during Companion discovery.
 
-The late-slot reply and dynamic BlockAck CAM regressions failed against the preceding source and passed after the fixes. Normal and ASan/UBSan execution passed. The research Python suite reported 205 passes and one optional historic-fixture skip out of 206 tests.
+The release build renames the kexts, bundle identifiers, IOKit classes, and the backend and frontend diagnostics. The bridge is linked to the new frontend UUID. Build checks and EFI installer validation cover the release package. A boot of the renamed cohort and continued testing of intermittent discovery remain open.
 
-The complete research build passed four runs of 12 software-AWDL checks and four runs of 28 SCC-lifecycle checks, plus import, compiled-vtable and signature validation. Its backend UUID was observed loaded after reboot. Full bridge activation and repeated real-world two-way tests for the new cohort remain pending.
-
-## Publication build
-
-The release build report records the checks and binaries produced by the public builder. Newly rebuilt binaries require runtime validation even when the code logic matches the research candidate. Directory renaming and compilation checks do not establish discovery reliability, RF delivery or AirDrop stability.
-
-Known limitations include a single actual radio channel, incomplete AP/off-channel coexistence, approximate radio clock mapping, and intermittent discovery/endpoint resolution. Shared Apple ID/contact avatar/name is a separate display behavior; the driver does not replace that identity with a device label.
+Six standalone v0.1.0 fixtures need updating for the current driver. They cover Block Ack, receive filters, VIF restoration, AWDL wire and clock behavior, and scanning. The current driver's scan-request checks, kernel import checks, P2P ABI check, raw transmit tests and bridge tests are part of the release build.

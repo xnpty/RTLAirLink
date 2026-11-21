@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* RTLAirLink integration and release changes dated 2026-11-21. */
 #include "owly_awdl_sync.h"
 #include "owly_radio_timing.h"
 #if defined(RTW89_MACOS)
@@ -417,9 +418,11 @@ int owly_sync_frame(struct owly_sync *s,uint64_t now,uint8_t *f,size_t cap,size_
             v[3]=s->peer_clock.master_channel;
         if(!owly_radio_project_window(s->peer_clock.sampled_us,s->peer_clock.sequence,
                s->peer_clock.until_next_tu,now,&sequence,&until_aw))return 0;
-        if (s->shared_slots)
-            advertised_slots = s->shared_slots;
     }
+    /* Advertise this radio's dwell slots. A same-channel radio is ready
+     * throughout the cycle. The transmit gate uses each peer's schedule. */
+    if (s->presence_slots)
+        advertised_slots = s->presence_slots;
 #endif
     /* Peers use the slot countdown even when every slot uses one channel.
      * The short remaining field describes the first AW in that slot. */
@@ -435,14 +438,15 @@ int owly_sync_frame(struct owly_sync *s,uint64_t now,uint8_t *f,size_t cap,size_
         s->mif_due_us=now+((uint64_t)until_slot+(follow ? 0u : 32u))*1024u;
     }
 #endif
-    /* The embedded sequence uses the legacy flag/channel pairs from Apple
-     * captures. The standalone sequence uses primary and operating class. */
+    /* Both sequence formats describe the AWDL data path's 20 MHz channel. */
     v[33]=15; v[34]=1; v[35]=0; v[36]=3; v[37]=v[38]=255;
-    const uint8_t legacy_center = s->channel == 6 ? 6 : s->channel + 2;
+    const uint8_t legacy_flags = s->channel == 6 ? 0x2b : 0x18;
+    const uint8_t operating_class = s->channel == 6 ? 0x51 :
+                                    s->channel == 44 ? 0x73 : 0x7c;
     for (i=0;i<16;i++) {
         if (!(advertised_slots & (1u << i))) continue;
-        v[39+2*i]=s->channel==6 ? 0x2b : 0x1d;
-        v[40+2*i]=legacy_center;
+        v[39+2*i]=legacy_flags;
+        v[40+2*i]=s->channel;
     }
     pos=40u+3u+SYNC_PARAMS_WIRE_LEN;
     f[pos]=18; put16(f+pos+1,CHANNEL_SEQUENCE_WIRE_LEN); v=f+pos+3;
@@ -450,7 +454,7 @@ int owly_sync_frame(struct owly_sync *s,uint64_t now,uint8_t *f,size_t cap,size_
     for (i=0;i<16;i++) {
         if (!(advertised_slots & (1u << i))) continue;
         v[6+2*i]=s->channel;
-        v[7+2*i]=s->channel==6 ? 0x51 : 0x80;
+        v[7+2*i]=operating_class;
     }
     pos+=3u+CHANNEL_SEQUENCE_WIRE_LEN;
     memcpy(f+pos,template_bytes,template_len);
@@ -470,7 +474,7 @@ int owly_sync_frame(struct owly_sync *s,uint64_t now,uint8_t *f,size_t cap,size_
             v=f+at+3;
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
             if(follow) {
-                memcpy(v,s->master_election,24);put32(v+16,1);
+                memcpy(v,s->master_election,24); /* distance already +1 */
             } else
 #endif
             {

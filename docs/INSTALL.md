@@ -1,45 +1,19 @@
-# Experimental installation
+# Install RTLAirLink 0.2.0
 
-This build targets RTL8852BE on Intel/x86_64 macOS build `25G241`. It relies on the exact Legacy Wi-Fi ABI below. It is not a universal Realtek or stable AirDrop installer. Keep a bootable EFI backup before replacing kernel drivers.
+Use this release on Intel macOS Tahoe with an existing OpenCore installation, Python 3.9 or newer and a Realtek RTL8852BE. Hardware testing used macOS build 25G241. The default installer validates the plan with OpenCore 1.0.9's ocvalidate. For a different OpenCore version, pass its corresponding executable with --ocvalidate.
 
-## Dependencies
+~~~bash
+curl -fL --proto '=https' --proto-redir '=https' -o install-rtlairlink.sh https://github.com/xnpty/RTLAirLink/releases/download/v0.2.0/install-rtlairlink.sh && bash install-rtlairlink.sh
+~~~
 
-Start with [DEPENDENCIES.md](DEPENDENCIES.md): it provides the three pinned upstream downloads, the included download helper, and the complete manual OpenCore steps from AirPort_RTW89 adapted to the renamed paired bundles.
+The command verifies the signed kexts and the pinned dependency downloads. It detects the OpenCore EFI and displays the target, load order and boot arguments before applying the changes. Type INSTALL when the preview shows the intended volume. Restart macOS after the installation completes.
 
-Provide your own compatible OpenCore installation and dependencies. The development setup used Lilu 1.7.3, the appropriate IOSkywalkFamily/IO80211FamilyLegacy arrangement, AMFIPass and working Realtek Bluetooth firmware/BlueToolFixup. Their required system configuration depends on the OS and is not supplied as a personal EFI here.
+You can unpack the [release ZIP](https://github.com/xnpty/RTLAirLink/releases/tag/v0.2.0) and run Install-RTLAirLink.command directly. Use --dry-run to check a mounted EFI before any write.
 
-The bridge pins IO80211FamilyLegacy UUID `4C07538B-62EB-3D6D-AEF9-93BCDCF45FAB` (executable SHA256 `ac2dc15b77f8eaf97b71b34c5d0e1b59f862bfeac618396449306e1837e73894`) and validates instruction prefixes at runtime. Different images must not be treated as compatible merely because the filenames match. The bridge also pins the frontend UUID of its build cohort.
+~~~bash
+bash Install-RTLAirLink.command --efi /Volumes/EFI --dry-run
+~~~
 
-## OpenCore entries
+The installer upgrades earlier RTLAirLink installations through their bundle IDs. It installs RTLAirLink.kext with the nested RTLAirLinkFront.kext, RTLAirBridge.kext, and the Wi-Fi stack. The bridge loads after Lilu and before the Wi-Fi family. The plan sets SecureBootModel to Disabled, configures the system Skywalk exclusion, and adds the Tahoe AMFIPass boot argument. AirDrop discovery relies on the Bluetooth configuration already present on your machine. [Dependency details](https://github.com/xnpty/RTLAirLink/blob/v0.2.0/docs/DEPENDENCIES.md)
 
-Replace both top-level bundles together. The renamed folders contain the original executable filenames; use these paths in `Kernel -> Add`:
-
-| BundlePath | ExecutablePath | PlistPath |
-| --- | --- | --- |
-| `RTLAirBridge.kext` | `Contents/MacOS/OwlyAirLinkBridge` | `Contents/Info.plist` |
-| `RTLAirLink.kext` | `Contents/MacOS/AirPort_RTW89` | `Contents/Info.plist` |
-| `RTLAirLink.kext/Contents/PlugIns/AirPortRTW89Front.kext` | `Contents/MacOS/AirPortRTW89Front` | `Contents/Info.plist` |
-
-Lilu must load before its bridge plugin. The required Legacy/Networking dependencies must be available to the frontend. Enable the three project entries and restrict them to the tested OS range; consult the build report for the exact binaries. When migrating from the old names, replace the existing project entries rather than adding duplicates: the internal bundle identifiers are intentionally unchanged.
-
-The runtime opt-in boot arguments retain their existing spelling:
-
-```text
--owlyeb1 owlyebstage=4
-```
-
-Other development stages intentionally leave the full native client path inactive. Renaming the folders does not rename those arguments. Do not replace unrelated boot arguments or copy another machine's NVRAM/configuration.
-
-Restart after installation and check the loaded bundle IDs/UUIDs against `BUILD_REPORT.json`. Signature verification and a successful reboot do not alone prove that the bridge activated or that AirDrop works.
-
-## Display names
-
-The new metadata advertises `RTLAirLink`, `RTLAirLinkFront` and `RTLAirBridge` as bundle display names. Wi-Fi driver-version reporting changes to `<detected chip> (RTLAirLink 0.1.0)`, while the controller model string changes to `RTLAirLink (<detected chip>)`. The vendor remains Realtek and the hardware-version field remains the actual chip model. The exact System Information presentation must be verified after installing and rebooting this build; macOS may cache labels or show hardware fields separately.
-
-Low-level bundle IDs such as `com.rtw89.driver`, `com.rtw89.front` and `com.owly.airlink.eventbridge`, executable names and IOService class names are intentionally retained for compatibility. Seeing those identifiers in detailed diagnostics is expected.
-
-## AirDrop validation
-
-Keep Wi-Fi and Bluetooth enabled. For a controlled discovery test, leave Finder → AirDrop open and unlock the receiving iPhone. Send multiple small files in both directions immediately and after 30–60 seconds idle, recording discovery delay separately from upload time.
-
-A cable can cause AirDrop to use a wired transport. Count a transfer as AWDL only when the runtime transport or a capture on `awdl0` confirms it. Prepare offline capture locally before disconnecting a router used for remote access. Intermittent Waiting/disappearance remains an open issue in this experimental line.
+Each install creates a folder in Downloads/RTLAirLink-Backups with the original config.plist and replaced kexts. If you need to recover, boot from your working OpenCore backup, restore the original config.plist and the files in the backup Kexts directory, then remove newly added kext directories absent from that backup. The installer rolls back changes if its post-install validation fails.

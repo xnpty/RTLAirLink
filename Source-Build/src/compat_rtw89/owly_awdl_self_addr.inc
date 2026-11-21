@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Based on FranciumOS-org/AirPort_RTW89 rtw89_compat_set_self_addr().
+/* RTLAirLink integration and release changes dated 2026-11-21. */
+/* RTLAirLink names and module metadata updated 2026-11-21. */
+/* Based on FranciumOS-org/RTLAirLink rtw89_compat_set_self_addr().
  * Only the idle MLME coordinator calls this. Keep the associated station's
  * hardware identity intact. Firmware errors roll back software and retry the
  * previous CAM; a forced restore also revalidates uncertain firmware state. */

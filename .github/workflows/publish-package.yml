@@ -6,7 +6,7 @@ on:
       tag:
         description: Existing release tag to publish
         required: true
-        default: v0.1.0
+        default: v0.2.0
         type: string
 
 permissions:
@@ -36,7 +36,7 @@ jobs:
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --dir package --pattern 'RTLAirLink-*.zip' \
             --pattern BUILD_REPORT.json --pattern RELEASE_MANIFEST.json \
-            --pattern SHA256SUMS
+            --pattern SHA256SUMS --pattern install-rtlairlink.sh
           python3 - <<'PY'
           import hashlib, json, os
           from pathlib import Path
@@ -46,6 +46,8 @@ jobs:
           folder = Path('package')
           names = {f'RTLAirLink-{tag}-x86_64.zip', f'RTLAirLink-{tag}-source.zip',
                    'BUILD_REPORT.json', 'RELEASE_MANIFEST.json', 'SHA256SUMS'}
+          if any(a['name'] == 'install-rtlairlink.sh' for a in release['assets']):
+              names.add('install-rtlairlink.sh')
           assert {p.name for p in folder.iterdir()} == names
           sums = {}
           for line in (folder / 'SHA256SUMS').read_text().splitlines():
@@ -69,7 +71,7 @@ jobs:
           with open(os.environ['GITHUB_ENV'], 'a') as env:
               env.write(f'SOURCE_REVISION={revision}\n')
               env.write('PACKAGE=ghcr.io/' + os.environ['GITHUB_REPOSITORY'].lower() + '\n')
-          print('All five release files verified against release digests and checksums.')
+          print(f'All {len(names)} release files verified against release digests and checksums.')
           PY
 
       - name: Install pinned ORAS CLI
@@ -93,6 +95,8 @@ jobs:
           set -euo pipefail
           printf '%s' "$GH_TOKEN" | oras login ghcr.io \
             --username "$GITHUB_ACTOR" --password-stdin
+          installer=()
+          if [[ -f install-rtlairlink.sh ]]; then installer+=('install-rtlairlink.sh:text/x-shellscript'); fi
           oras push "$PACKAGE:$RELEASE_TAG" \
             --artifact-type application/vnd.rtlairlink.release.v1 \
             --annotation "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
@@ -104,7 +108,7 @@ jobs:
             "RTLAirLink-$RELEASE_TAG-x86_64.zip:application/zip" \
             "RTLAirLink-$RELEASE_TAG-source.zip:application/zip" \
             BUILD_REPORT.json:application/json RELEASE_MANIFEST.json:application/json \
-            SHA256SUMS:text/plain
+            SHA256SUMS:text/plain "${installer[@]}"
 
       - name: Pull the published digest and verify every file
         shell: bash
@@ -123,7 +127,7 @@ jobs:
             echo
             echo "Digest: \`$digest\`"
             echo
-            echo 'All five downloaded files match the original release byte for byte.'
+            echo 'All downloaded files match the original release byte for byte.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Log out of the registry

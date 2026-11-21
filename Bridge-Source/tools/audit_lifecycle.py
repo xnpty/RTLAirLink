@@ -42,17 +42,17 @@ def main():
                 raise SystemExit('UNREGISTERED_OR_WRONG_STATUS_TYPE: ' + file + ':' + key)
     if 'OwlyStatus::flush(' in clean['Bootstrap.cpp'] or 'OwlyStatus::flush(' in clean['Plugin.cpp']:
         raise SystemExit('REGISTRY_PUBLICATION_OUTSIDE_SERVICE')
-    if 'IOWorkLoop::workLoop()' not in body(clean['Service.cpp'], 'bool OwlyAirLinkBridge::start('):
+    if 'IOWorkLoop::workLoop()' not in body(clean['Service.cpp'], 'bool RTLAirBridge::start('):
         raise SystemExit('DEFERRED_WORKLOOP_MISSING')
     if 'LILU_CUSTOM_IOKIT_INIT=1' not in (root / 'build_macos.sh').read_text():
         raise SystemExit('CUSTOM_SERVICE_BUILD_FLAG_MISSING')
     bootstrap = body(clean['Bootstrap.cpp'], 'ADDPR(kern_start)')
-    service = body(clean['Service.cpp'], 'bool OwlyAirLinkBridge::start(')
+    service = body(clean['Service.cpp'], 'bool RTLAirBridge::start(')
     callback = body(clean['Plugin.cpp'], 'void loaded(')
     initializer = body(clean['Plugin.cpp'], 'bool OwlyRuntime::initialize(')
     opened = body(clean['Plugin.cpp'], 'IOReturn hookedOpen(')
-    if 'uint32_t requestedStage = 1;' not in bootstrap or 'owlyStartupPlan.registrationAllowed()' not in bootstrap:
-        raise SystemExit('REGISTRATION_ONLY_DEFAULT_OR_BOOTSTRAP_GATE_MISSING')
+    if 'uint32_t requestedStage = 4;' not in bootstrap or 'owlyStartupPlan.registrationAllowed()' not in bootstrap:
+        raise SystemExit('DEFAULT_ACTIVATION_OR_BOOTSTRAP_GATE_MISSING')
     if 'if (!runtimeRequested)' not in service or 'owlyStartupPlan.runtimeAllowed()' not in service:
         raise SystemExit('SERVICE_RUNTIME_STAGE_GATE_MISSING')
     if service.index('if (!runtimeRequested)') > service.index('IOWorkLoop::workLoop()'):
@@ -104,7 +104,7 @@ def main():
         raise SystemExit('UNSCOPED_NATIVE_METHOD_ROUTE')
     print('NATIVE_CLIENT_ADAPTER_AUDIT_PASSED: entitlement+original factory, exact class, gated routes and close/stop/free cleanup')
     print('LIFECYCLE_SOURCE_AUDIT_PASSED: no direct early IOKit/resource allocation; service owns publication')
-    print('STAGE_BOUNDARY_AUDIT_PASSED: default1; stage1/2 callbacks never read target headers or route; runtime and modern open gated')
+    print('STAGE_BOUNDARY_AUDIT_PASSED: default stage 4; stage 1/2 callbacks never read target headers or route; runtime and modern open gated')
     print('TARGET_DESCRIPTOR_GATE_PASSED: rejects invalid targets before Lilu registration and runtime activation')
 
 

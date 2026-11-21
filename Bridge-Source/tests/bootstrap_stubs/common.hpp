@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 #define EXPORT
-#define ADDPR(x) OwlyAirLinkBridge_##x
+#define ADDPR(x) RTLAirBridge_##x
 #define OSDeclareDefaultStructors(X)
 #define OSDefineMetaClassAndStructors(X,Y)
 #define OSDynamicCast(X,p) dynamic_cast<X *>(p)
