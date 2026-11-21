@@ -18,6 +18,6 @@ Trình cài tải gói và các phụ thuộc, kiểm tra SHA‑256, hiện thay
 
 ## Kết quả kiểm thử
 
-Mã nguồn làm nền cho bản phát hành đã truyền file hai chiều qua IPv6 trên awdl0 với RTL8852BE, macOS build 25G241 và cấu hình Bluetooth riêng. Mac gửi thành công 6/8 lượt. Chiều ngược lại nhận một ảnh 922.428 byte, khớp SHA‑256 với ảnh gốc. Hai lượt gửi dừng khi dò dịch vụ Companion. Bộ kext v0.2.0 đã qua kiểm thử build và trình cài. Việc xác nhận sau boot với các bundle ID mới còn chờ. [Chi tiết](docs/STATUS.md)
+Mã nguồn làm nền cho bản phát hành đã truyền file hai chiều qua IPv6 trên awdl0 với RTL8852BE, macOS build 25G241 và cấu hình Bluetooth riêng. Mac gửi thành công 6/8 lượt. Chiều ngược lại nhận tám ảnh 922.428 byte, khớp SHA‑256 với ảnh gốc. Hai lượt gửi dừng khi dò dịch vụ Companion. Bộ kext v0.2.0 đã qua kiểm thử build và trình cài. Việc xác nhận sau boot với các bundle ID mới còn chờ. [Chi tiết](docs/STATUS.md)
 
 [Build từ mã nguồn](docs/BUILD.md) · [Giấy phép và ghi công](CREDITS.md)
