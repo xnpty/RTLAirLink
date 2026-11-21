@@ -55,12 +55,20 @@ def bundle_info(bundle):
 
 def bundle_id(bundle):
     info = bundle / 'Contents/Info.plist'
-    return read_plist(info).get('CFBundleIdentifier') if info.is_file() else None
+    if not info.is_file():
+        return None
+    try:
+        data = read_plist(info)
+    except (plistlib.InvalidFileException, ValueError):
+        return None
+    identifier = data.get('CFBundleIdentifier') if isinstance(data, dict) else None
+    return identifier if isinstance(identifier, str) else None
 
 
 def executable_path(bundle, info):
     name = info['CFBundleExecutable']
-    require(Path(name).name == name and name not in ('', '.', '..'), 'Invalid kext executable name')
+    require(isinstance(name, str) and Path(name).name == name and name not in ('', '.', '..'),
+            'Invalid kext executable name')
     executable = bundle / 'Contents/MacOS' / name
     require(executable.is_file(), f'Missing executable in {bundle.name}')
     return executable
@@ -85,6 +93,7 @@ def validate_package(package):
         require(digest_tree(package / name) == manifest['bundle_files'][name],
                 f'Unexpected file contents in {name}')
         subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '--deep', str(package/name)], check=True)
+    return manifest
 
 
 def validate_dependency(path, entry):
@@ -96,22 +105,48 @@ def validate_dependency(path, entry):
 
 
 def version_tuple(value):
-    parts = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', value or '')
+    parts = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', value) if isinstance(value, str) else None
     return tuple(map(int, parts.groups())) if parts else ()
 
 
-def prepare(package, existing, cache, folder, custom_validator):
+def dependency_matches(bundle, entry):
+    try:
+        if entry['bundle'] == LILU:
+            info = bundle_info(bundle)
+            executable_path(bundle, info)
+            return version_tuple(info.get('CFBundleVersion')) >= version_tuple(entry['bundle_version'])
+        validate_dependency(bundle, entry)
+    except (RuntimeError, OSError, KeyError, ValueError, plistlib.InvalidFileException):
+        return False
+    return True
+
+
+def reusable_bundle(installed, name, identifier, matches):
+    candidates = sorted(installed.get(identifier, []), key=lambda path: (path.name != name, path.name))
+    return next((path.name for path in candidates if matches(path)), None)
+
+
+def prepare(package, manifest, existing, cache, folder, custom_validator):
+    installed = {}
+    for bundle in existing.iterdir():
+        if bundle.suffix.lower() == '.kext' and bundle.is_dir() and not bundle.is_symlink():
+            installed.setdefault(bundle_id(bundle), []).append(bundle)
+    reused = {}
     for name in (DRIVER, BRIDGE):
-        shutil.copytree(package / name, folder / name)
+        expected_files = manifest['bundle_files'][name]
+        current = reusable_bundle(installed, name, RELEASE_IDS[name],
+                                  lambda path: digest_tree(path) == expected_files)
+        if current:
+            reused[name] = current
+        else:
+            shutil.copytree(package / name, folder / name)
     for entry in LOCK['dependencies']:
         name = entry['bundle']
-        if name == LILU:
-            current = existing / LILU
-            if bundle_id(current) == entry['bundle_identifier']:
-                info = bundle_info(current)
-                if version_tuple(info.get('CFBundleVersion')) >= version_tuple(entry['bundle_version']):
-                    executable_path(current, info)
-                    continue
+        current = reusable_bundle(installed, name, entry['bundle_identifier'],
+                                  lambda path: dependency_matches(path, entry))
+        if current:
+            reused[name] = current
+            continue
         path = unpack_bundle(entry, cache, folder)
         validate_dependency(path, entry)
         if name == FAMILY:
@@ -120,17 +155,21 @@ def prepare(package, existing, cache, folder, custom_validator):
                     shutil.rmtree(plugin)
     if custom_validator is not None:
         require(custom_validator.is_file() and os.access(custom_validator, os.X_OK), 'ocvalidate is not executable')
-        return custom_validator
+        return custom_validator, reused
     spec = LOCK['validator']
     target = folder.parent / 'ocvalidate'
     with zipfile.ZipFile(fetch(spec, cache)) as file:
         target.write_bytes(file.read(spec['member']))
     target.chmod(0o700)
-    return target
+    return target, reused
 
 
-def kext_entry(name, folder, existing):
-    bundle = (folder if (folder / name).is_dir() else existing) / name
+def kext_entry(name, folder, existing, reused):
+    path = PurePosixPath(name)
+    current = reused.get(path.parts[0])
+    if current is not None:
+        path = PurePosixPath(current, *path.parts[1:])
+    bundle = (existing if current is not None else folder) / path
     info = bundle_info(bundle)
     exe = executable_path(bundle, info)
     if name in RELEASE_IDS:
@@ -139,12 +178,12 @@ def kext_entry(name, folder, existing):
         minimum, maximum = '23.0.0', ''
     else:
         minimum, maximum = '', ''
-    return {'Arch': 'x86_64', 'BundlePath': name, 'Comment': name.split('/')[-1],
+    return {'Arch': 'x86_64', 'BundlePath': path.as_posix(), 'Comment': path.name,
             'Enabled': True, 'ExecutablePath': exe.relative_to(bundle).as_posix(),
             'MaxKernel': maximum, 'MinKernel': minimum, 'PlistPath': 'Contents/Info.plist'}
 
 
-def configure(config, existing, staged):
+def configure(config, existing, staged, reused):
     managed_ids = set(RELEASE_IDS.values()) | MIGRATION_IDS | DEPENDENCY_IDS
     managed_names = {name for name in ORDER if '/' not in name}
     installed = {p.name for p in existing.iterdir() if p.is_dir() and p.suffix.lower() == '.kext'
@@ -152,7 +191,6 @@ def configure(config, existing, staged):
     entries = config['Kernel']['Add']
     retained = []
     preserved_lilu = None
-    insert_at = None
     wifi_at = None
     for item in entries:
         path = PurePosixPath(item['BundlePath'])
@@ -160,27 +198,28 @@ def configure(config, existing, staged):
                 f'Invalid BundlePath in config.plist: {path}')
         managed = path.parts[0] in installed | managed_names or bundle_id(existing / path) in managed_ids
         if managed:
-            if str(path) == LILU:
-                insert_at = len(retained)
-                if not (staged / LILU).exists():
-                    preserved_lilu = item.copy()
-            elif wifi_at is None:
+            if str(path) == reused.get(LILU):
+                preserved_lilu = item.copy()
+            elif str(path) != LILU and wifi_at is None:
                 wifi_at = len(retained)
             continue
         if item['Enabled']:
             require((existing / path).is_dir(), f'Enabled kext directory is missing: {path}')
         retained.append(item)
-    new = [kext_entry(name, staged, existing) for name in ORDER]
+    new = [kext_entry(name, staged, existing, reused) for name in ORDER]
     if preserved_lilu:
-        preserved_lilu.update(Enabled=True, PlistPath=new[0]['PlistPath'],
-                              ExecutablePath=new[0]['ExecutablePath'])
-        require(preserved_lilu.get('Arch', 'Any') in ('Any', 'x86_64'),
-                'The installed Lilu entry does not apply to x86_64')
-        new[0] = preserved_lilu
-    index = insert_at if insert_at is not None else 0
-    wifi_index = max(index, wifi_at if wifi_at is not None else index)
-    entries[:] = (retained[:index] + new[:1] + retained[index:wifi_index]
-                  + new[1:] + retained[wifi_index:])
+        kernel = version_tuple(platform.release())
+        if not kernel or kernel[0] != 25:
+            kernel = (25, 0, 0)
+        minimum = version_tuple(preserved_lilu.get('MinKernel'))
+        maximum = version_tuple(preserved_lilu.get('MaxKernel'))
+        if (preserved_lilu.get('Arch') in ('Any', 'x86_64')
+                and (not minimum or minimum <= kernel) and (not maximum or kernel <= maximum)):
+            preserved_lilu.update(Enabled=True, PlistPath=new[0]['PlistPath'],
+                                  ExecutablePath=new[0]['ExecutablePath'])
+            new[0] = preserved_lilu
+    wifi_index = wifi_at if wifi_at is not None else 0
+    entries[:] = new[:1] + retained[:wifi_index] + new[1:] + retained[wifi_index:]
 
     blocks = config['Kernel']['Block']
     blocks[:] = [item for item in blocks if item['Identifier'] != SKYWALK_ID]
@@ -192,14 +231,23 @@ def configure(config, existing, staged):
     nvram = config['NVRAM']
     args = nvram['Add'].setdefault(NVRAM, {})
     previous = args.get('boot-args', '').split()
-    managed_args = set(BOOT_ARGS) | REMOVED_BOOT_ARGS
-    args['boot-args'] = ' '.join([a for a in previous if a.split('=', 1)[0] not in managed_args] + list(BOOT_ARGS))
+    updated = []
+    for arg in previous:
+        name = arg.partition('=')[0]
+        if name in REMOVED_BOOT_ARGS:
+            continue
+        if name in BOOT_ARGS:
+            if name in updated:
+                continue
+            arg = name
+        updated.append(arg)
+    updated.extend(arg for arg in BOOT_ARGS if arg not in updated)
+    if updated != previous:
+        args['boot-args'] = ' '.join(updated)
     deletes = nvram['Delete'].setdefault(NVRAM, [])
     if 'boot-args' not in deletes:
         deletes.append('boot-args')
-    if not (staged / LILU).exists():
-        installed.discard(LILU)
-    return installed
+    return installed.difference(reused.values()), [item['BundlePath'] for item in new]
 
 
 def diskutil_info(target):
@@ -258,16 +306,16 @@ def write_atomic(target, content):
         pending.unlink(missing_ok=True)
 
 
-def install(oc, remove, staged, original, candidate, validator, backup_root):
+def install(oc, remove, staged, original, candidate, validator, backup_root, reused_files):
     lock = oc / 'RTLAirLink-install.active'
     lock.mkdir()
     try:
-        install_transaction(oc, remove, staged, original, candidate, validator, backup_root)
+        install_transaction(oc, remove, staged, original, candidate, validator, backup_root, reused_files)
     finally:
         lock.rmdir()
 
 
-def install_transaction(oc, remove, staged, original, candidate, validator, backup_root):
+def install_transaction(oc, remove, staged, original, candidate, validator, backup_root, reused_files):
     live = oc / 'Kexts'
     config = oc / 'config.plist'
     require(config.read_bytes() == original, 'EFI changed after the installation preview')
@@ -275,6 +323,8 @@ def install_transaction(oc, remove, staged, original, candidate, validator, back
     names = remove | {p.name for p in sources if (live / p.name).exists()}
     require(all((live / name).is_dir() and not (live / name).is_symlink() for name in names),
             'An existing kext changed before installation')
+    require(all(digest_tree(live / name) == hashes for name, hashes in reused_files.items()),
+            'A kext selected for reuse changed after the installation preview')
     before = {name: digest_tree(live / name) for name in names}
     backup_root.mkdir(parents=True, exist_ok=True)
     backup = Path(tempfile.mkdtemp(prefix=datetime.now().strftime('RTLAirLink-%Y%m%d-%H%M%S-'), dir=backup_root))
@@ -291,13 +341,13 @@ def install_transaction(oc, remove, staged, original, candidate, validator, back
     new.mkdir()
     removed, placed = [], []
     try:
-        checksums = {}
+        checksums = reused_files.copy()
         for source in sources:
             shutil.copytree(source, new / source.name)
             checksums[source.name] = digest_tree(source)
             require(digest_tree(new / source.name) == checksums[source.name], f'Stage copy differs for {source.name}')
         require(config.read_bytes() == original and
-                all(digest_tree(live / name) == hashes for name, hashes in before.items()),
+                all(digest_tree(live / name) == hashes for name, hashes in (before | reused_files).items()),
                 'EFI changed while staging the update')
         for name in sorted(names):
             (live / name).rename(old / name)
@@ -307,7 +357,8 @@ def install_transaction(oc, remove, staged, original, candidate, validator, back
             placed.append(source.name)
         require(all(digest_tree(live / name) == hashes for name, hashes in checksums.items()),
                 'Installed kext files differ from the release')
-        write_atomic(config, candidate)
+        if candidate != original:
+            write_atomic(config, candidate)
         validate_config(validator, config)
     except BaseException:
         if candidate != original and config.read_bytes() == candidate:
@@ -333,7 +384,7 @@ def main():
     require(platform.system() == 'Darwin' and platform.machine() == 'x86_64', 'RTLAirLink requires macOS on Intel')
     require(args.dry_run or platform.release().split('.')[0] == '25', 'This release targets macOS Tahoe')
     require(not args.yes or args.efi is not None, '--yes requires an explicit --efi volume')
-    validate_package(ROOT)
+    manifest = validate_package(ROOT)
     oc = find_oc(args.efi)
     existing = oc / 'Kexts'
     config_path = oc / 'config.plist'
@@ -352,24 +403,33 @@ def main():
     with tempfile.TemporaryDirectory(prefix='rtlairlink-install-') as path:
         stage = Path(path) / 'Kexts'
         stage.mkdir()
-        validator = prepare(ROOT, existing, args.cache.expanduser(), stage,
-                            args.ocvalidate.expanduser().resolve() if args.ocvalidate else None)
-        remove = configure(config, existing, stage)
+        validator, reused = prepare(ROOT, manifest, existing, args.cache.expanduser(), stage,
+                                    args.ocvalidate.expanduser().resolve() if args.ocvalidate else None)
+        reused_files = {name: digest_tree(existing / name) for name in reused.values()}
+        remove, load_order = configure(config, existing, stage, reused)
+        changes_config = config != plistlib.loads(original)
+        planned = plistlib.dumps(config, sort_keys=False) if changes_config else original
         candidate = Path(path) / 'config.plist'
-        candidate.write_bytes(plistlib.dumps(config, sort_keys=False))
+        candidate.write_bytes(planned)
         validate_config(validator, candidate)
         print(f'OpenCore target {oc}')
-        print('Load order ' + ', '.join(ORDER))
+        print('Load order ' + ', '.join(load_order))
         print('Boot arguments ' + ' '.join(BOOT_ARGS))
         print('SecureBootModel Disabled')
-        print('Kexts to replace ' + (', '.join(sorted(remove)) or 'none'))
+        copy = sorted(path.name for path in stage.iterdir())
+        print('Kexts to copy ' + (', '.join(copy) or 'none'))
+        print('Existing kexts to reuse ' + (', '.join(reused.values()) or 'none'))
+        print('Existing kexts to replace or remove ' + (', '.join(sorted(remove)) or 'none'))
         if args.dry_run:
             print('Dry run passed.')
             return
+        if not copy and not remove and not changes_config:
+            print(f'RTLAirLink {VERSION} and its dependencies are already configured.')
+            return
         if not args.yes:
             require(input('Type INSTALL to back up and apply this plan: ').strip() == 'INSTALL', 'Installation cancelled')
-        install(oc, remove, stage, original, candidate.read_bytes(), validator,
-                Path.home()/'Downloads'/'RTLAirLink-Backups')
+        install(oc, remove, stage, original, planned, validator,
+                Path.home()/'Downloads'/'RTLAirLink-Backups', reused_files)
 
 
 if __name__ == '__main__':
