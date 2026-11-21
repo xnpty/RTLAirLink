@@ -23,7 +23,7 @@ The installer downloads the release and pinned dependencies, previews the OpenCo
 
 ## Status
 
-The hardware test used an RTL8852BE on macOS build 25G241 with Bluetooth configured separately. The driver source underlying this release completed transfers both ways over IPv6 on awdl0. Six of eight Mac-to-iPhone sends succeeded, and one iPhone-to-Mac transfer matched the original SHA-256. Two sends stalled during Companion discovery. The v0.2.0 binaries have build and installer checks. Their first hardware boot is pending. [Verification details](docs/STATUS.md)
+The hardware test used an RTL8852BE on macOS build 25G241 with Bluetooth configured separately. The driver source underlying this release completed transfers both ways over IPv6 on awdl0. Six of eight Mac-to-iPhone sends succeeded, and eight iPhone-to-Mac transfer matched the original SHA-256. Two sends stalled during Companion discovery. The v0.2.0 binaries have build and installer checks. Their first hardware boot is pending. [Verification details](docs/STATUS.md)
 
 ## Build
 
