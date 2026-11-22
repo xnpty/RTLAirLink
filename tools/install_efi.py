@@ -16,7 +16,7 @@ import sys
 import tempfile
 import zipfile
 
-from download_dependencies import LOCK, ROOT, fetch, sha, unpack_bundle
+from download_dependencies import LOCK, ROOT, dependency_entries, fetch, sha, unpack_bundle
 
 VERSION = '0.2.0'
 DRIVER = 'RTLAirLink.kext'
@@ -25,6 +25,11 @@ BRIDGE = 'RTLAirBridge.kext'
 FAMILY = 'IO80211FamilyLegacy.kext'
 LILU = 'Lilu.kext'
 ORDER = (LILU, BRIDGE, 'IOSkywalkFamily.kext', FAMILY, 'AMFIPass.kext', DRIVER, FRONT)
+BLUETOOTH_ORDER = tuple(entry['bundle'] for entry in LOCK['bluetooth']['dependencies'])
+BLUETOOTH_NVRAM = {
+    'bluetoothExternalDongleFailed': bytes(1),
+    'bluetoothInternalControllerInfo': bytes(14),
+}
 NVRAM = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 SKYWALK_ID = 'com.apple.iokit.IOSkywalkFamily'
 RELEASE_IDS = {
@@ -34,7 +39,7 @@ RELEASE_IDS = {
 }
 # Bundle IDs recognize pre-0.2.0 installations under any directory name.
 MIGRATION_IDS = {'com.rtw89.driver', 'com.rtw89.front', 'com.owly.airlink.eventbridge'}
-DEPENDENCY_IDS = {entry['bundle_identifier'] for entry in LOCK['dependencies']}
+LEGACY_COMPANION_ID = 'org.franciumos.BroadTek'
 REMOVED_BOOT_ARGS = {'-owlyeb1', '-owlyeb1off', 'owlyebstage'}
 BOOT_ARGS = ('-amfipassbeta',)
 
@@ -111,12 +116,16 @@ def version_tuple(value):
 
 def dependency_matches(bundle, entry):
     try:
-        if entry['bundle'] == LILU:
+        minimum = entry['bundle_version'] if entry['bundle'] == LILU else entry.get('minimum_reuse_version')
+        if minimum:
             info = bundle_info(bundle)
-            executable_path(bundle, info)
-            return version_tuple(info.get('CFBundleVersion')) >= version_tuple(entry['bundle_version'])
+            executable = executable_path(bundle, info)
+            return (info['CFBundleIdentifier'] == entry['bundle_identifier']
+                    and version_tuple(info.get('CFBundleVersion')) >= version_tuple(minimum)
+                    and 'x86_64' in subprocess.check_output(['/usr/bin/file', '-b', str(executable)], text=True))
         validate_dependency(bundle, entry)
-    except (RuntimeError, OSError, KeyError, ValueError, plistlib.InvalidFileException):
+    except (RuntimeError, OSError, KeyError, ValueError, plistlib.InvalidFileException,
+            subprocess.CalledProcessError):
         return False
     return True
 
@@ -126,7 +135,7 @@ def reusable_bundle(installed, name, identifier, matches):
     return next((path.name for path in candidates if matches(path)), None)
 
 
-def prepare(package, manifest, existing, cache, folder, custom_validator):
+def prepare(package, manifest, existing, cache, folder, custom_validator, with_bluetooth=False):
     installed = {}
     for bundle in existing.iterdir():
         if bundle.suffix.lower() == '.kext' and bundle.is_dir() and not bundle.is_symlink():
@@ -140,7 +149,7 @@ def prepare(package, manifest, existing, cache, folder, custom_validator):
             reused[name] = current
         else:
             shutil.copytree(package / name, folder / name)
-    for entry in LOCK['dependencies']:
+    for entry in dependency_entries(with_bluetooth):
         name = entry['bundle']
         current = reusable_bundle(installed, name, entry['bundle_identifier'],
                                   lambda path: dependency_matches(path, entry))
@@ -172,7 +181,7 @@ def kext_entry(name, folder, existing, reused):
     bundle = (existing if current is not None else folder) / path
     info = bundle_info(bundle)
     exe = executable_path(bundle, info)
-    if name in RELEASE_IDS:
+    if name in RELEASE_IDS or name in BLUETOOTH_ORDER:
         minimum, maximum = '25.0.0', '25.99.99'
     elif name in ('IOSkywalkFamily.kext', FAMILY):
         minimum, maximum = '23.0.0', ''
@@ -183,14 +192,21 @@ def kext_entry(name, folder, existing, reused):
             'MaxKernel': maximum, 'MinKernel': minimum, 'PlistPath': 'Contents/Info.plist'}
 
 
-def configure(config, existing, staged, reused):
-    managed_ids = set(RELEASE_IDS.values()) | MIGRATION_IDS | DEPENDENCY_IDS
-    managed_names = {name for name in ORDER if '/' not in name}
-    installed = {p.name for p in existing.iterdir() if p.is_dir() and p.suffix.lower() == '.kext'
-                 and (p.name in managed_names or bundle_id(p) in managed_ids)}
+def configure(config, existing, staged, reused, with_bluetooth=False):
+    order = ORDER + (BLUETOOTH_ORDER if with_bluetooth else ())
+    dependency_ids = {entry['bundle_identifier'] for entry in dependency_entries(with_bluetooth)}
+    managed_ids = set(RELEASE_IDS.values()) | MIGRATION_IDS | dependency_ids
+    managed_names = {name for name in order if '/' not in name}
+    bundles = {path.name: bundle_id(path) for path in existing.iterdir()
+               if path.is_dir() and path.suffix.lower() == '.kext'}
+    if MIGRATION_IDS.intersection(bundles.values()):
+        managed_ids.add(LEGACY_COMPANION_ID)
+    installed = {name for name, identifier in bundles.items()
+                 if name in managed_names or identifier in managed_ids}
     entries = config['Kernel']['Add']
     retained = []
-    preserved_lilu = None
+    preserve_paths = {reused.get(name) for name in (LILU, *BLUETOOTH_ORDER)}
+    preserved = {}
     wifi_at = None
     for item in entries:
         path = PurePosixPath(item['BundlePath'])
@@ -198,26 +214,28 @@ def configure(config, existing, staged, reused):
                 f'Invalid BundlePath in config.plist: {path}')
         managed = path.parts[0] in installed | managed_names or bundle_id(existing / path) in managed_ids
         if managed:
-            if str(path) == reused.get(LILU):
-                preserved_lilu = item.copy()
+            if str(path) in preserve_paths:
+                preserved.setdefault(str(path), item)
             elif str(path) != LILU and wifi_at is None:
                 wifi_at = len(retained)
             continue
         if item['Enabled']:
             require((existing / path).is_dir(), f'Enabled kext directory is missing: {path}')
         retained.append(item)
-    new = [kext_entry(name, staged, existing, reused) for name in ORDER]
-    if preserved_lilu:
-        kernel = version_tuple(platform.release())
-        if not kernel or kernel[0] != 25:
-            kernel = (25, 0, 0)
-        minimum = version_tuple(preserved_lilu.get('MinKernel'))
-        maximum = version_tuple(preserved_lilu.get('MaxKernel'))
-        if (preserved_lilu.get('Arch') in ('Any', 'x86_64')
+    new = [kext_entry(name, staged, existing, reused) for name in order]
+    kernel = version_tuple(platform.release())
+    if not kernel or kernel[0] != 25:
+        kernel = (25, 0, 0)
+    for index, entry in enumerate(new):
+        current = preserved.get(entry['BundlePath'])
+        if not current:
+            continue
+        minimum = version_tuple(current.get('MinKernel'))
+        maximum = version_tuple(current.get('MaxKernel'))
+        if (current.get('Arch') in ('Any', 'x86_64')
                 and (not minimum or minimum <= kernel) and (not maximum or kernel <= maximum)):
-            preserved_lilu.update(Enabled=True, PlistPath=new[0]['PlistPath'],
-                                  ExecutablePath=new[0]['ExecutablePath'])
-            new[0] = preserved_lilu
+            new[index] = dict(current, Enabled=True, PlistPath=entry['PlistPath'],
+                              ExecutablePath=entry['ExecutablePath'])
     wifi_index = wifi_at if wifi_at is not None else 0
     entries[:] = new[:1] + retained[:wifi_index] + new[1:] + retained[wifi_index:]
 
@@ -247,7 +265,25 @@ def configure(config, existing, staged, reused):
     deletes = nvram['Delete'].setdefault(NVRAM, [])
     if 'boot-args' not in deletes:
         deletes.append('boot-args')
+    if with_bluetooth:
+        args.update(BLUETOOTH_NVRAM)
+        deletes.extend(name for name in BLUETOOTH_NVRAM if name not in deletes)
     return installed.difference(reused.values()), [item['BundlePath'] for item in new]
+
+
+def detect_realtek_bluetooth():
+    registry = subprocess.check_output([
+        '/usr/sbin/ioreg', '-a', '-p', 'IOUSB', '-r', '-c', 'IOUSBHostDevice', '-d', '1', '-w0',
+    ])
+    supported = LOCK['bluetooth']['usb_devices']
+    matches = set()
+    for device in plistlib.loads(registry):
+        vendor, product = device.get('idVendor'), device.get('idProduct')
+        if isinstance(vendor, int) and isinstance(product, int):
+            vid, pid = f'{vendor:04x}', f'{product:04x}'
+            if pid in supported.get(vid, ()):
+                matches.add(f'{vid}:{pid}')
+    return sorted(matches)
 
 
 def diskutil_info(target):
@@ -378,6 +414,8 @@ def main():
     parser.add_argument('--efi', type=Path, help='Mounted volume containing EFI/OC')
     parser.add_argument('--cache', type=Path, default=Path.home()/ 'Downloads/RTLAirLink-Dependencies')
     parser.add_argument('--ocvalidate', type=Path, help='Validator from your OpenCore release')
+    parser.add_argument('--with-bluetooth', action='store_true',
+                        help='Set up Bluetooth when a supported Realtek USB controller is detected')
     parser.add_argument('--dry-run', action='store_true', help='Validate the plan without writing to the EFI')
     parser.add_argument('--yes', action='store_true', help='Apply to the explicitly selected --efi volume')
     args = parser.parse_args()
@@ -400,13 +438,16 @@ def main():
                 'Select a mounted FAT partition containing OpenCore')
         require(os.access(oc, os.W_OK) and os.access(existing, os.W_OK),
                 'The EFI is read-only. Remount it with write access and run the installer again.')
+    bluetooth_controllers = detect_realtek_bluetooth() if args.with_bluetooth else []
+    with_bluetooth = bool(bluetooth_controllers)
     with tempfile.TemporaryDirectory(prefix='rtlairlink-install-') as path:
         stage = Path(path) / 'Kexts'
         stage.mkdir()
+        custom_validator = args.ocvalidate.expanduser().resolve() if args.ocvalidate else None
         validator, reused = prepare(ROOT, manifest, existing, args.cache.expanduser(), stage,
-                                    args.ocvalidate.expanduser().resolve() if args.ocvalidate else None)
+                                    custom_validator, with_bluetooth)
         reused_files = {name: digest_tree(existing / name) for name in reused.values()}
-        remove, load_order = configure(config, existing, stage, reused)
+        remove, load_order = configure(config, existing, stage, reused, with_bluetooth)
         changes_config = config != plistlib.loads(original)
         planned = plistlib.dumps(config, sort_keys=False) if changes_config else original
         candidate = Path(path) / 'config.plist'
@@ -416,6 +457,11 @@ def main():
         print('Load order ' + ', '.join(load_order))
         print('Boot arguments ' + ' '.join(BOOT_ARGS))
         print('SecureBootModel Disabled')
+        if with_bluetooth:
+            print('Realtek Bluetooth USB ' + ', '.join(bluetooth_controllers))
+            print('Bluetooth NVRAM ' + ', '.join(BLUETOOTH_NVRAM))
+        elif args.with_bluetooth:
+            print('Wi-Fi plan only. The Realtek Bluetooth controller must appear on USB and match the firmware.')
         copy = sorted(path.name for path in stage.iterdir())
         print('Kexts to copy ' + (', '.join(copy) or 'none'))
         print('Existing kexts to reuse ' + (', '.join(reused.values()) or 'none'))

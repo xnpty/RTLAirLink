@@ -1,5 +1,7 @@
 # Dependencies
 
-The installer reuses `Lilu.kext` 1.7.3 or newer and copies of `IOSkywalkFamily.kext`, `IO80211FamilyLegacy.kext`, and `AMFIPass.kext` with the expected bundle IDs, versions, and executable digests. It obtains missing or incompatible dependencies from the pinned providers and verifies each archive's size and SHA-256 before extracting it. [Version and checksum lock](../DEPENDENCIES.json) · [Third-party credits](../CREDITS.md)
+The installer reuses Intel builds of `Lilu.kext` 1.7.3 or newer and `AMFIPass.kext` 1.4.1 or newer. It checks the bundle IDs, versions and executable digests of `IOSkywalkFamily.kext` and `IO80211FamilyLegacy.kext`. It obtains missing or incompatible dependencies from the pinned providers and verifies each archive's size and SHA-256 before extracting it. [Version and checksum lock](../DEPENDENCIES.json) · [Third-party credits](../CREDITS.md)
 
-To pre-download the dependency archives for an offline installation, run Download-Dependencies.command from the source tree. The installer uses its cache in Downloads/RTLAirLink-Dependencies by default. Use --cache to point to another directory.
+For supported Realtek USB Bluetooth controllers, `--with-bluetooth` adds `BlueToolFixup.kext` 2.7.3 from Dortania's build of Acidanthera BrcmPatchRAM and `RealtekBluetoothFirmware.kext` 1.0.2 from thegwchr. The installer reuses BlueToolFixup 2.7.2 or newer and the matching firmware bundle. [Bluetooth download versions and supported USB IDs](../DEPENDENCIES.json)
+
+Use `./Download-Dependencies.command --with-bluetooth` from the source tree to pre-download all dependency archives. The installer uses `Downloads/RTLAirLink-Dependencies` by default. Use `--cache` to point to another directory.

@@ -43,10 +43,58 @@
       "size": 191154,
       "bundle_identifier": "com.dhinakg.AMFIPass",
       "bundle_version": "1.4.1",
+      "minimum_reuse_version": "1.4.1",
       "executable_sha256": "4c35bc196d35c69b5f9dca83fe733801211c7828716f51585c7f5450039ca884",
       "executable_uuid_description": "UUID: 7DF1CDFC-7EFE-3D82-A3A2-7DACE8B1D097 (x86_64)"
     }
   ],
+  "bluetooth": {
+    "usb_devices": {
+      "0489": ["e085", "e08b", "e112", "e122", "e123", "e125", "e12f", "e130"],
+      "04c5": ["161f", "165c", "1675"],
+      "04ca": ["4005", "4006", "4007"],
+      "04f2": ["b49f"],
+      "0930": ["021d"],
+      "0b05": ["17dc", "185c", "18ef", "190e"],
+      "0bda": ["2852", "385a", "4852", "4853", "8520", "8771", "887b", "8922", "b009", "b00c", "b850", "b85b", "c123", "c822", "c852"],
+      "0cb5": ["c547"],
+      "0cb8": ["c549", "c558", "c559"],
+      "1358": ["c123"],
+      "13d3": ["3394", "3410", "3414", "3416", "3458", "3459", "3461", "3462", "3494", "3526", "3529", "3533", "3548", "3549", "3553", "3555", "3570", "3571", "3572", "3586", "3587", "3591", "3592", "3600", "3601", "3612", "3616", "3617", "3618", "3619"],
+      "2001": ["332a"],
+      "2357": ["0604"],
+      "2550": ["8761"],
+      "2b89": ["6275", "8761"],
+      "2c0a": ["8761"],
+      "2ff8": ["3051", "b011"],
+      "3625": ["010b"],
+      "6655": ["8771"],
+      "7392": ["a611", "c611", "e611"]
+    },
+    "dependencies": [
+      {
+        "bundle": "BlueToolFixup.kext",
+        "filename": "BrcmPatchRAM-2.7.3-RELEASE.zip",
+        "url": "https://github.com/dortania/build-repo/releases/download/BrcmPatchRAM-6538902/BrcmPatchRAM-2.7.3-RELEASE.zip",
+        "sha256": "71a4bdf9d0804f16f4f9a35f5b67288cd680eda44e4347cd60640f2e422299ea",
+        "size": 5422645,
+        "bundle_identifier": "as.acidanthera.BlueToolFixup",
+        "bundle_version": "2.7.3",
+        "minimum_reuse_version": "2.7.2",
+        "executable_sha256": "e11fc0299c230e716fbbb9d2eb6df54c1494338a9201f903bab22c410ff57f0b"
+      },
+      {
+        "bundle": "RealtekBluetoothFirmware.kext",
+        "filename": "RealtekBluetoothFirmware_v1.0.2_5080405E-068B-3F14-92D7-0F48AB51C52B.zip",
+        "url": "https://github.com/thegwchr/RealtekBluetoothFirmware/releases/download/v1.0.2/RealtekBluetoothFirmware_v1.0.2_5080405E-068B-3F14-92D7-0F48AB51C52B.zip",
+        "sha256": "d9fc23d9c8d942720d93e687cfff863aee1198a821ca4f089c8d2eae9cab0c61",
+        "size": 617803,
+        "bundle_identifier": "org.thegwchr.RealtekBluetoothFirmware",
+        "bundle_version": "1.0.2",
+        "executable_sha256": "9599f9a77fd64e8f1a5511228275fe17c44eba9cbf0f55c82c3ddc7cc7b27987"
+      }
+    ]
+  },
   "validator": {
     "version": "1.0.9",
     "filename": "OpenCore-1.0.9-RELEASE.zip",

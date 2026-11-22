@@ -16,6 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCK = json.loads((ROOT / 'DEPENDENCIES.json').read_text())
 
 
+def dependency_entries(with_bluetooth=False):
+    if with_bluetooth:
+        return LOCK['dependencies'] + LOCK['bluetooth']['dependencies']
+    return LOCK['dependencies']
+
+
 def sha(path):
     digest = hashlib.sha256()
     with path.open('rb') as stream:
@@ -36,8 +42,12 @@ def fetch(entry, directory):
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / name
     if target.is_file():
-        verify(target, entry)
-        return target
+        try:
+            verify(target, entry)
+        except RuntimeError:
+            print(f'Cached archive failed verification. Replacing {name} after download.', flush=True)
+        else:
+            return target
     print(f'Downloading {name}', flush=True)
     with tempfile.TemporaryDirectory(prefix='dependency-', dir=directory) as folder:
         partial = Path(folder) / name
@@ -81,8 +91,9 @@ def unpack_bundle(entry, cache, destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=Path.home() / 'Downloads/RTLAirLink-Dependencies')
+    parser.add_argument('--with-bluetooth', action='store_true', help='Include the Realtek Bluetooth archives')
     args = parser.parse_args()
-    for entry in [*LOCK['dependencies'], LOCK['validator']]:
+    for entry in [*dependency_entries(args.with_bluetooth), LOCK['validator']]:
         path = fetch(entry, args.out)
         print(f'Verified {path.name}')
     print(f'Dependency archives are in {args.out}')
