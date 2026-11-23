@@ -1510,11 +1510,12 @@ SInt32 RTLAirLinkFront::apple80211VirtualRequest(UInt type, int number,
      * buffer through the primary interface without starting a session. */
     if (type==SIOCGA80211 &&
         (number==APPLE80211_IOC_POWER || number==APPLE80211_IOC_SUPPORTED_CHANNELS ||
-         number==APPLE80211_IOC_HT_CAPABILITY) &&
+         number==APPLE80211_IOC_HT_CAPABILITY || number==APPLE80211_IOC_VHT_CAPABILITY) &&
         vif && data && _netif &&
         vif->getInterfaceRole()==RTW89_FRONT_ROLE_AIRLINK_OBSERVED) {
         const SInt32 rc=apple80211Request(type,number,_netif,data);
         setProperty(number==APPLE80211_IOC_HT_CAPABILITY ? "OwlyAWDLHTCapabilityResult" :
+                    number==APPLE80211_IOC_VHT_CAPABILITY ? "OwlyAWDLVHTCapabilityResult" :
                     number==APPLE80211_IOC_POWER ? "OwlyAWDLPowerQueryResult" :
                     "OwlyAWDLChannelsQueryResult",
                     static_cast<unsigned long long>(static_cast<uint32_t>(rc)),32);

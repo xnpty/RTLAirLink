@@ -452,7 +452,8 @@ static void rtw89_phy_ra_sta_update(struct rtw89_dev *rtwdev,
 	ra_mask = rtw89_phy_ra_mask_recover(ra_mask, ra_mask_bak);
 #if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
 	/* Keep the peer's legacy OFDM rates available for AWDL fallback. */
-	if (rtwsta_link->rtwsta->owly_awdl && (mode & RTW89_RA_MODE_HT))
+	if (rtwsta_link->rtwsta->owly_awdl &&
+	    (mode & (RTW89_RA_MODE_HT | RTW89_RA_MODE_VHT)))
 		ra_mask |= ra_mask_bak & RA_MASK_OFDM_RATES;
 #endif
 	ra_mask &= rtw89_phy_ra_mask_cfg(rtwdev, rtwsta_link, link_sta, chan);
@@ -3362,8 +3363,9 @@ static void __rtw89_phy_c2h_ra_rpt_iter(struct rtw89_sta_link *rtwsta_link,
 
 		if (reports <= 8 || !(reports & (reports - 1)))
 			IOLog("RTLAirLink AWDL firmware TX rate: macid=%u reports=%u mode=%u "
-			      "mcs=%u kbps=%u action_rssi_raw=%u\n",
+			      "bw=%u nss=%u mcs=%u kbps=%u action_rssi_raw=%u\n",
 			      (unsigned)mac_id, reports, (unsigned)mode,
+			      (unsigned)ra_report->txrate.bw, (unsigned)ra_report->txrate.nss,
 			      (unsigned)ra_report->txrate.mcs, (unsigned)ra_report->bit_rate * 100u,
 			      (unsigned)READ_ONCE(rtwsta_link->owly_awdl_action_rssi));
 	}

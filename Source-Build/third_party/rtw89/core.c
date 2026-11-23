@@ -1309,13 +1309,17 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	const struct sk_buff *skb = tx_req->skb;
 	const u8 *frame = skb->data;
 
+	const bool is_qos = frame[0] == (IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_DATA);
+	const size_t hdr_len = is_qos ? 26 : 24;
+
 	/* The native radio submitter allocates a shared software sequence.
 	 * The default management path would replace it using a separate
-	 * hardware counter, colliding with non-QoS data from this same MAC. */
+	 * hardware counter, colliding with non-QoS data from this same MAC.
+	 * QoS Data frames carry their own sequential per-TID sequence number. */
 	if (rtwdev->chip->chip_id == RTL8852B && tx_req->vif && tx_req->vif->p2p &&
 	    (info->flags & IEEE80211_TX_CTL_INJECTED) &&
-	    (info->flags & IEEE80211_TX_INTFL_DONT_ENCRYPT) && skb->len >= 24 &&
-	    (frame[0] == 0xd0 || frame[0] == IEEE80211_FTYPE_DATA) &&
+	    (info->flags & IEEE80211_TX_INTFL_DONT_ENCRYPT) && skb->len >= hdr_len &&
+	    (frame[0] == 0xd0 || frame[0] == IEEE80211_FTYPE_DATA || is_qos) &&
 	    !(frame[1] & 0x47) && !(frame[22] & 15) &&
 	    !memcmp(frame + 10, link->mac_addr, ETH_ALEN) &&
 	    !memcmp(frame + 16, awdl_bssid, sizeof(awdl_bssid))) {
@@ -1327,12 +1331,13 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    tx_req->tx_type != RTW89_CORE_TX_TYPE_DATA ||
 	    !(info->flags & IEEE80211_TX_CTL_INJECTED) ||
 	    !(info->flags & IEEE80211_TX_INTFL_DONT_ENCRYPT) ||
-	    !(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS) ||
 	    (info->flags & IEEE80211_TX_CTL_NO_ACK) || desc_info->is_bmc ||
-	    skb->len < 81 || frame[0] != IEEE80211_FTYPE_DATA || frame[1] ||
+	    (frame[0] != IEEE80211_FTYPE_DATA && !is_qos) || frame[1] ||
+	    skb->len < hdr_len + 57u ||
+	    (is_qos && (frame[24] != 0 || frame[25] != 0)) ||
 	    memcmp(frame + 10, link->mac_addr, ETH_ALEN) ||
 	    memcmp(frame + 16, awdl_bssid, sizeof(awdl_bssid)) ||
-	    memcmp(frame + 24, awdl_snap, sizeof(awdl_snap)))
+	    memcmp(frame + hdr_len, awdl_snap, sizeof(awdl_snap)))
 		return;
 
 	if (!tx_req->sta) {
@@ -1342,13 +1347,30 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	}
 
 	const struct rtw89_sta_link *peer = tx_req->rtwsta_link;
+	const struct rtw89_chan *chan = rtw89_chan_get(rtwdev, link->chanctx_idx);
 	if (peer && peer->rtwsta->owly_awdl && peer->ra_configured &&
 	    peer->ra.macid == desc_info->mac_id && peer->ra.ra_mask &&
-	    peer->ra.bw_cap == RTW89_CHANNEL_WIDTH_20) {
+	    peer->ra.bw_cap <= chan->band_width) {
 		/* Let firmware choose the data rate using the AWDL peer's
-		 * 20 MHz OFDM rate table. Keep the raw frame and its sequence. */
+		 * negotiated HT/VHT rate table. Keep the raw frame and sequence. */
 		desc_info->use_rate = false;
 		desc_info->dis_data_fb = false;
+		if (is_qos && (info->flags & IEEE80211_TX_CTL_AMPDU) &&
+		    test_bit(0, peer->rtwsta->ampdu_map)) {
+			const struct ieee80211_link_sta *lsta = &tx_req->sta->deflink;
+			u16 agg_num = peer->rtwsta->ampdu_params[0].agg_num;
+			if (!agg_num)
+				agg_num = (u16)(4u << lsta->ht_cap.ampdu_factor);
+			if (agg_num > 64u)
+				agg_num = 64u;
+			desc_info->agg_en = true;
+			desc_info->ampdu_num = (u8)(agg_num - 1u);
+			desc_info->ampdu_density = lsta->ht_cap.ampdu_density;
+			desc_info->hw_rts_en = true;
+			desc_info->rts_en = true;
+			desc_info->tx_cnt_lmt_en = true;
+			desc_info->tx_cnt_lmt = 6;
+		}
 	}
 }
 #endif

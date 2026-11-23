@@ -47,6 +47,8 @@ struct owly_sync {
     uint16_t shared_slots;
     /* Multichannel: slots we are on the social channel; 0 = all. */
     uint16_t presence_slots;
+    /* Actual bound channel width (20, 40, or 80 MHz; 0 defaults to 20). */
+    uint8_t channel_width;
     bool have_master_election;
     uint8_t master_election[24];
 #endif

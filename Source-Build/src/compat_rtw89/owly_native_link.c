@@ -19,7 +19,21 @@ static const uint8_t snap[8]={0xaa,0xaa,3,0,0x17,0xf2,8,0};
 #define OWLY_LINK_PEER_AWAKE_US 100000u
 #define OWLY_LINK_IDLE_AW_US 4000u
 #define OWLY_LINK_IDLE_RETURN_GUARD_US 1024u
-_Static_assert(OWLY_LINK_QUEUE<=32u,"TX occupancy mask must cover the entire queue");
+_Static_assert(OWLY_LINK_QUEUE<=128u,"TX occupancy mask must cover the entire queue");
+static unsigned queue_alloc_slot(struct owly_native_link *s) {
+    if (~s->queue_used[0]) {
+        unsigned bit = (unsigned)__builtin_ctzll(~s->queue_used[0]);
+        s->queue_used[0] |= 1ull << bit;
+        return bit;
+    }
+    unsigned bit = (unsigned)__builtin_ctzll(~s->queue_used[1]);
+    s->queue_used[1] |= 1ull << bit;
+    return 64u + bit;
+}
+static void queue_free_slot(struct owly_native_link *s, unsigned slot) {
+    if (slot < 64u) s->queue_used[0] &= ~(1ull << slot);
+    else s->queue_used[1] &= ~(1ull << (slot - 64u));
+}
 static bool mac_ok(const uint8_t *a) {return a && !(a[0]&1u) && (a[0]|a[1]|a[2]|a[3]|a[4]|a[5]);}
 static bool channel_ok(uint8_t c) {return c==6 || c==44 || c==149;}
 static uint16_t be16(const uint8_t *p) {return (uint16_t)((uint16_t)p[0]<<8|p[1]);}
@@ -36,7 +50,7 @@ static void expire(struct owly_native_link *s,uint64_t now) {
     unsigned i;
     if(now<s->last_now_us) {
         memset(s->peers,0,sizeof(s->peers));s->tx_expired+=s->count;s->head=s->count=0;
-        s->queue_used=0;
+        s->queue_used[0]=s->queue_used[1]=0;
         s->last_unicast_activity_us=0;
         s->preferred_us=now;
         s->pause_started_us=s->tx_paused ? now : 0;
@@ -60,7 +74,7 @@ void owly_link_reconcile(struct owly_native_link *s,bool active,const uint8_t lo
     active=active && mac_ok(local) && channel_ok(ch);
     if(active!=s->active || (active && (s->channel!=ch || memcmp(s->local,local,6)))) {
         memset(s->peers,0,sizeof(s->peers));s->tx_expired+=s->count;s->head=s->count=0;
-        s->queue_used=0;
+        s->queue_used[0]=s->queue_used[1]=0;
         s->last_unicast_activity_us=0;
         memset(s->preferred,0,6);s->preferred_us=0;++s->generation;
         s->tx_paused=false;s->pause_started_us=0;
@@ -209,7 +223,17 @@ bool owly_link_observe(struct owly_native_link *s,const uint8_t *raw,size_t n,ui
     sample_peer_clock(s,p,&d,master,aw_countdown(&d,remaining,presence),now);
     p->last_rx_us=now;
     p->rssi=rssi;p->channel=ch;
-    if(d.has_ht_rx_mcs)p->ht_rx_mcs=d.ht_rx_mcs;
+    if(d.has_ht_rx_mcs) {
+        p->ht_rx_mcs=d.ht_rx_mcs;
+        p->ht_cap_info=d.ht_cap_info;
+        p->ht_ampdu_params=d.ht_ampdu_params;
+    }
+    if(d.has_vht_cap) {
+        p->has_vht_cap=true;
+        p->vht_cap_info=d.vht_cap_info;
+        p->vht_rx_mcs_map=d.vht_rx_mcs_map;
+        p->vht_tx_mcs_map=d.vht_tx_mcs_map;
+    }
     /* iOS sends MIFs with this field zero while keeping the same master.
      * A frame heard on the AP channel does not locate the master's channel. */
     if(channel_ok(d.master_channel))p->master_channel=d.master_channel;
@@ -217,9 +241,14 @@ bool owly_link_observe(struct owly_native_link *s,const uint8_t *raw,size_t n,ui
     /* A peer may advertise its infrastructure channel in other slots.
      * Retain its identity from this real SCC action; mark those slots unavailable. */
     p->local_slots=0;
+    p->max_channel_width=20u;
     for(i=0;i<16;i++) {
         p->channels[i]=channel_ok(d.channels[i]) ? d.channels[i] : 0;
-        p->local_slots+=p->channels[i]==ch;
+        if (p->channels[i]==ch) {
+            ++p->local_slots;
+            if (d.channel_widths[i] > p->max_channel_width)
+                p->max_channel_width = d.channel_widths[i];
+        }
     }
     /* PSFs are also heard on social-channel visits outside the peer's
      * data schedule. An on-schedule MIF is stronger evidence of presence. */
@@ -584,6 +613,18 @@ int owly_link_build_tx(const uint8_t *eth,size_t n,const uint8_t local[6],uint16
     else {memcpy(out+24,snap,8);out[32]=3;out[33]=4;put16(out+34,awdl);out[36]=out[37]=0;out[38]=0x86;out[39]=0xdd;memcpy(out+40,ip,iplen);}
     *length=need;return 0;
 }
+bool owly_link_promote_qos(uint8_t *frame,size_t *length,size_t cap,uint16_t qos_sn,uint8_t tid)
+{
+    if (!frame || !length || *length < 40u || *length + 2u > cap ||
+        frame[0] != 0x08u || (frame[4] & 1u) || tid >= 16u)
+        return false;
+    memmove(frame + 26, frame + 24, *length - 24u);
+    frame[0] = 0x88u;
+    put16(frame + 22, (uint16_t)((qos_sn & 4095u) << 4));
+    put16(frame + 24, (uint16_t)tid);
+    *length += 2u;
+    return true;
+}
 static enum owly_link_tx_kind tx_kind(const uint8_t destination[6],const uint8_t *ip,size_t n)
 {
     static const uint8_t group[16]={0xff,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0xfb};
@@ -602,21 +643,22 @@ int owly_link_enqueue(struct owly_native_link *s,const uint8_t *eth,size_t n,uin
     expire(s,now);
     if(s->count==OWLY_LINK_QUEUE) {++s->tx_refused;return -ENOBUFS;}
     /* Reuse payload storage freed by replies that passed a held query. */
-    at=(unsigned)__builtin_ctz(~s->queue_used);f=&s->queue[at];
+    at=queue_alloc_slot(s);f=&s->queue[at];
     rc=owly_link_build_tx(eth,n,s->local,0,0,f->bytes,sizeof(f->bytes),&size);
-    if(rc) {++s->tx_refused;return rc;}
+    if(rc) {queue_free_slot(s,at);++s->tx_refused;return rc;}
     memcpy(f->destination,f->bytes+4,6);
     f->kind=tx_kind(f->destination,f->bytes+40,size-40);
     /* BSD can emit the first Bonjour query or announcement as soon as the
      * VIF comes up, before Apple finishes SET151/117. Keep it on the bound
      * radio's queue until the normal sync gate opens. */
     if(!s->sync_enabled && f->kind!=OWLY_LINK_TX_MDNS_QUERY &&
-       f->kind!=OWLY_LINK_TX_MDNS_REPLY)
+       f->kind!=OWLY_LINK_TX_MDNS_REPLY) {
+        queue_free_slot(s,at);
         return -ENETDOWN;
+    }
     f->awaiting_first_mif=!s->sync_enabled;
-    if(!(f->destination[0]&1u) && !find(s,f->destination)) {++s->tx_refused;return -EHOSTUNREACH;}
+    if(!(f->destination[0]&1u) && !find(s,f->destination)) {queue_free_slot(s,at);++s->tx_refused;return -EHOSTUNREACH;}
     f->length=(uint16_t)size;f->queued_us=now;f->pause_credit_us=0;f->generation=s->generation;
-    s->queue_used|=1u<<at;
     s->queue_order[(s->head+s->count)%OWLY_LINK_QUEUE]=(uint8_t)at;
     ++s->count;++s->tx_enqueued;
     if(f->kind==OWLY_LINK_TX_UNICAST)s->last_unicast_activity_us=now;
@@ -694,7 +736,7 @@ bool owly_link_unicast_reply_tx_ready(struct owly_native_link *s,
 static void remove_queued(struct owly_native_link *s,unsigned offset)
 {
     const unsigned at=(s->head+offset)%OWLY_LINK_QUEUE;
-    s->queue_used&=~(1u<<s->queue_order[at]);
+    queue_free_slot(s,s->queue_order[at]);
     --s->count;
     if(!offset) {
         s->head=(s->head+1u)%OWLY_LINK_QUEUE;

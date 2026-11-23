@@ -195,12 +195,14 @@ struct rtw89_glue_awdl_sync_status {
 };
 int rtw89_glue_awdl_config(bool set, unsigned number, void *data);
 int rtw89_glue_awdl_ht_capability(void *output, size_t capacity);
+int rtw89_glue_awdl_vht_capability(void *output, size_t capacity);
 int rtw89_glue_awdl_sync_template(const uint8_t *bytes, size_t length);
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
 int rtw89_glue_awdl_mi(bool automatic, const uint8_t destination[6],
                        const uint8_t *bytes, size_t length);
 int rtw89_glue_awdl_vif_disable(void);
 int rtw89_glue_awdl_action_rssi(bool enabled);
+int rtw89_glue_awdl_turbo(bool enabled);
 int rtw89_glue_awdl_rx_sample_start(const uint8_t peer[6]);
 void rtw89_glue_awdl_rx_sample_stop(void);
 #endif

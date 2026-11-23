@@ -149,9 +149,9 @@ static void queue(void) {
     owly_link_tx_result(&link_state,offset,generation,0);CHECK(link_state.tx_handoffs==1 && !link_state.tx_radio_acked);
     CHECK(owly_link_next_tx(&link_state,1000300,true,wire,sizeof(wire),&out,&offset,&generation)==0 && out==0);
     for(unsigned i=0;i<OWLY_LINK_QUEUE;i++)CHECK(!owly_link_enqueue(&link_state,eth,n,1000400+i));
-    CHECK(owly_link_enqueue(&link_state,eth,n,1000500)==-ENOBUFS);
-    owly_link_reconcile(&link_state,false,NULL,0,1000600);CHECK(link_state.count==0 && link_state.tx_expired==32);
-    CHECK(owly_link_enqueue(&link_state,eth,n,1000700)==-ENETDOWN);
+    CHECK(owly_link_enqueue(&link_state,eth,n,1000600)==-ENOBUFS);
+    owly_link_reconcile(&link_state,false,NULL,0,1000700);CHECK(link_state.count==0 && link_state.tx_expired==OWLY_LINK_QUEUE);
+    CHECK(owly_link_enqueue(&link_state,eth,n,1000800)==-ENETDOWN);
     start();CHECK(!owly_link_enqueue(&link_state,eth,n,1000100));
     CHECK(owly_link_next_tx(&link_state,2100101,true,wire,sizeof(wire),&out,&offset,&generation)==0 && link_state.tx_expired==1);
     start();CHECK(!owly_link_enqueue(&link_state,eth,n,1000100));
@@ -314,6 +314,24 @@ static void ht_receive_rates(void)
     raw[n+8]=0;
     CHECK(owly_link_observe(&link_state,raw,n+sizeof(ht),149,-42,now+6));
     CHECK(!peer->ht_rx_mcs);
+
+    /* VHT TLV17 (14 bytes: EID 191, len 12, cap + MCS maps) and 2SS HT TLV7. */
+    static const uint8_t ht2[]={7,9,0,0,0,0xef,0x01,0x17,0xff,0xff,0,0};
+    static const uint8_t vht[]={17,14,0,0xbf,0x0c,0xb1,0x01,0x80,0x03,0xfa,0xff,0,0,0xfa,0xff,0,0};
+    memcpy(raw+n,ht2,sizeof(ht2));
+    memcpy(raw+n+sizeof(ht2),vht,sizeof(vht));
+    CHECK(owly_link_observe(&link_state,raw,n+sizeof(ht2)+sizeof(vht),149,-42,now+7));
+    CHECK(peer->ht_rx_mcs==0xffff && peer->ht_cap_info==0x01ef && peer->ht_ampdu_params==0x17);
+    CHECK(peer->has_vht_cap && peer->vht_cap_info==0x038001b1u && peer->vht_rx_mcs_map==0xfffa);
+
+    /* Promote built unicast Non-QoS frame to QoS Data with exact sequence. */
+    size_t eth_len=ethernet(false), wlen=0;
+    CHECK(!owly_link_build_tx(eth,eth_len,local,7,9,wire,sizeof(wire),&wlen));
+    CHECK(wire[0]==0x08 && wlen==eth_len-14+40);
+    uint8_t snap_copy[16]; memcpy(snap_copy,wire+24,16);
+    CHECK(owly_link_promote_qos(wire,&wlen,sizeof(wire),0x345,0));
+    CHECK(wire[0]==0x88 && wire[22]==0x50 && wire[23]==0x34 && wire[24]==0 && wire[25]==0);
+    CHECK(!memcmp(wire+26,snap_copy,16) && wlen==eth_len-14+42);
 }
 
 int main(int argc,char **argv)

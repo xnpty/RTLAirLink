@@ -6,13 +6,17 @@
 #include "owly_awdl_sync.h"
 enum { NL80211_BAND_2GHZ, NL80211_BAND_5GHZ };
 struct ieee80211_supported_band {
-    struct { bool ht_supported; uint8_t ampdu_density;
+    struct { bool ht_supported; uint16_t cap; uint8_t ampdu_factor, ampdu_density;
              struct { uint8_t rx_mask[10]; } mcs; } ht_cap;
+    struct { bool vht_supported; uint32_t cap;
+             struct { uint16_t rx_mcs_map, tx_mcs_map; } vht_mcs; } vht_cap;
 };
 struct wiphy { struct ieee80211_supported_band *bands[2]; bool locked; };
+struct rtw89_dev { struct { uint8_t tx_nss, rx_nss; } hal; };
 static struct ieee80211_supported_band bands[2];
 static struct wiphy phy;
-static struct ieee80211_hw { struct wiphy *wiphy; } hw={&phy};
+static struct rtw89_dev dev = {{1, 1}};
+static struct ieee80211_hw { struct wiphy *wiphy; struct rtw89_dev *priv; } hw={&phy, &dev};
 static struct { bool active,probed; int cmd_lock; } glue;
 static void mutex_lock(int *p){assert(!*p);*p=1;}
 static void mutex_unlock(int *p){assert(*p==1);*p=0;}
@@ -47,15 +51,28 @@ int main(void)
     for(unsigned i=0;i<2;i++){
         phy.bands[i]=&bands[i];bands[i].ht_cap.ht_supported=true;
         bands[i].ht_cap.mcs.rx_mask[0]=255;
+        bands[i].ht_cap.mcs.rx_mask[1]=255;
+        bands[i].ht_cap.ampdu_factor=0;
+        bands[i].ht_cap.cap=0x000c;
     }
     bands[0].ht_cap.ampdu_density=2;bands[1].ht_cap.ampdu_density=4;
     assert(!rtw89_glue_awdl_ht_capability(reply,32));
-    /* Independent Legacy GET154 fixture: full EID45 IE, not a bare body.
-     * HT20/NSS1/long GI, no 40MHz, RX STBC, beamforming or second stream.
-     */
     static const uint8_t expected[32]={1,0,0,0,45,26,12,0,16,255,
         0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0};
     assert(!memcmp(reply,expected,32) && guarded[0]==0xa5 && guarded[33]==0xa5);
+    /* Verify 2SS + 64 KB A-MPDU + HT40/SGI/LDPC/STBC + VHT 18-byte ABI. */
+    dev.hal.tx_nss=2; dev.hal.rx_nss=2;
+    bands[0].ht_cap.ampdu_factor=3; bands[1].ht_cap.ampdu_factor=3;
+    bands[0].ht_cap.cap=0x01ef; bands[1].ht_cap.cap=0x01ef;
+    assert(!rtw89_glue_awdl_ht_capability(reply,32));
+    assert(reply[6]==0xef && reply[7]==0x01 && reply[8]==19 && reply[9]==255 && reply[10]==255);
+    uint8_t vht_reply[20]; memset(vht_reply, 0xa5, sizeof(vht_reply));
+    assert(owly_awdl_build_vht(vht_reply, 18, 0x038001b1u, 0xfffa, 0xfffa));
+    assert(vht_reply[0]==1 && vht_reply[4]==191 && vht_reply[5]==12 &&
+           vht_reply[10]==0xfa && vht_reply[11]==0xff && vht_reply[18]==0xa5);
+    dev.hal.tx_nss=1; dev.hal.rx_nss=1;
+    bands[0].ht_cap.ampdu_factor=0; bands[1].ht_cap.ampdu_factor=0;
+    bands[0].ht_cap.cap=0x000c; bands[1].ht_cap.cap=0x000c;
     assert(!glue.cmd_lock && !phy.locked);
     bands[1].ht_cap.mcs.rx_mask[0]=15;
     assert(!rtw89_glue_awdl_ht_capability(reply,32) && reply[9]==15);

@@ -24,6 +24,7 @@ def run(source, output, cc=None):
     for name in ('IEEE80211_TX_CTL_REQ_TX_STATUS', 'IEEE80211_TX_CTL_NO_ACK',
                  'IEEE80211_TX_CTL_ASSIGN_SEQ', 'IEEE80211_TX_CTL_SEND_AFTER_DTIM',
                  'IEEE80211_TX_CTL_INJECTED', 'IEEE80211_TX_INTFL_DONT_ENCRYPT',
+                 'IEEE80211_TX_CTL_AMPDU',
                  'IEEE80211_TX_CTL_NO_CCK_RATE', 'IEEE80211_TX_RC_USE_RTS_CTS',
                  'IEEE80211_TX_RC_40_MHZ_WIDTH', 'IEEE80211_TX_RC_80_MHZ_WIDTH',
                  'IEEE80211_TX_RC_160_MHZ_WIDTH', 'IEEE80211_TX_RC_SHORT_GI',
@@ -43,6 +44,8 @@ def run(source, output, cc=None):
     if awdl_port:
         functions.insert(1, extract_function(core, 'rtw89_core_tx_update_awdl_port'))
     submit = extract_function(glue, 'owly_sync_submit')
+    if 'owly_sync_write_frame(' in submit:
+        submit = extract_function(glue, 'owly_sync_write_frame') + '\n\n' + submit
     if 'owly_awdl_away(' in submit:
         submit = extract_function(glue, 'owly_awdl_away') + '\n\n' + submit
     compiler = cc or shutil.which('cc')

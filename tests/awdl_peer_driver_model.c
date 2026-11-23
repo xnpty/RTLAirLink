@@ -10,16 +10,43 @@
 #include <errno.h>
 #include "owly_native_link.h"
 #include "owly_awdl_ba.h"
-typedef uint8_t u8;typedef uint16_t u16;
+typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;
 #define FCS_LEN 4
 #define BIT(n) (1u<<(n))
 #define RTL8852B 1
+#define NL80211_BAND_2GHZ 0
+#define NL80211_BAND_5GHZ 1
+#define NL80211_CHAN_WIDTH_20 1
+#define NL80211_CHAN_WIDTH_40 2
+#define NL80211_CHAN_WIDTH_80 3
+#define NL80211_CHAN_WIDTH_160 4
 #define IEEE80211_STA_RX_BW_20 0
+#define IEEE80211_STA_RX_BW_40 1
+#define IEEE80211_STA_RX_BW_80 2
+#define IEEE80211_HT_CAP_LDPC_CODING 0x0001
+#define IEEE80211_HT_CAP_SUP_WIDTH_20_40 0x0002
+#define IEEE80211_HT_CAP_SGI_20 0x0020
+#define IEEE80211_HT_CAP_SGI_40 0x0040
+#define IEEE80211_HT_CAP_TX_STBC 0x0080
+#define IEEE80211_HT_CAP_RX_STBC 0x0300
+#define IEEE80211_VHT_CAP_RXLDPC 0x00000010
+#define IEEE80211_VHT_CAP_SHORT_GI_80 0x00000020
+#define IEEE80211_VHT_CAP_TXSTBC 0x00000080
+#define IEEE80211_VHT_CAP_RXSTBC_MASK 0x00000700
+#define IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK 0x03800000
 #define IEEE80211_QOS_CTL_ACK_POLICY_MASK 0x60
 #define IEEE80211_QOS_CTL_ACK_POLICY_NOACK 0x20
 #define MAX_RSSI 110
 #define RSSI_FACTOR 1
 #define WRITE_ONCE(field,value) ((field)=(value))
+#define cpu_to_le16(x) ((uint16_t)(x))
+#define le16_to_cpu(x) ((uint16_t)(x))
+enum ieee80211_ampdu_mlme_action {
+    IEEE80211_AMPDU_RX_START, IEEE80211_AMPDU_RX_STOP,
+    IEEE80211_AMPDU_TX_START, IEEE80211_AMPDU_TX_STOP_CONT,
+    IEEE80211_AMPDU_TX_STOP_FLUSH, IEEE80211_AMPDU_TX_STOP_FLUSH_CONT,
+    IEEE80211_AMPDU_TX_OPERATIONAL
+};
 typedef unsigned spinlock_t;
 static void spin_lock_init(spinlock_t *l){*l=0;}
 static void spin_lock(spinlock_t *l){assert(!*l);*l=1;}
@@ -57,26 +84,32 @@ struct ieee80211_sta {
     struct {
         unsigned bandwidth,rx_nss,link_id;
         uint32_t supp_rates[3];
-        struct {bool ht_supported;struct {uint8_t rx_mask[10];} mcs;} ht_cap;
+        struct {bool ht_supported;uint16_t cap;uint8_t ampdu_factor,ampdu_density;struct {uint8_t rx_mask[10];} mcs;} ht_cap;
+        struct {bool vht_supported;uint32_t cap;struct {uint16_t rx_mcs_map,tx_mcs_map;} vht_mcs;} vht_cap;
     } deflink;
     unsigned max_rx_aggregation_subframes;
     struct rtw89_sta private;
 };
 static struct rtw89_sta *sta_to_rtwsta(struct ieee80211_sta *s){return &s->private;}
-struct ieee80211_vif {uint8_t addr[6];};
 struct ieee80211_channel {unsigned band;};
-struct ieee80211_supported_band {unsigned n_bitrates;struct {unsigned bitrate;} bitrates[4];};
+struct cfg80211_chan_def {struct ieee80211_channel *chan;unsigned width;};
+struct ieee80211_vif {uint8_t addr[6];struct {struct {struct cfg80211_chan_def oper;} chanreq;} bss_conf;};
+struct ieee80211_supported_band {
+    unsigned n_bitrates;struct {unsigned bitrate;} bitrates[4];
+    struct {bool ht_supported;uint16_t cap;uint8_t ampdu_factor,ampdu_density;struct {uint8_t rx_mask[10];} mcs;} ht_cap;
+    struct {bool vht_supported;uint32_t cap;struct {uint16_t rx_mcs_map,tx_mcs_map;} vht_mcs;} vht_cap;
+};
 struct wiphy {bool held;struct ieee80211_supported_band *bands[3];};
 struct ieee80211_hw {struct wiphy *wiphy;void *priv;unsigned queues;};
-struct rtw89_dev {struct {unsigned chip_id,bacam_dynamic_num;} *chip;};
-struct ieee80211_ampdu_params {struct ieee80211_sta *sta;u16 tid,ssn,buf_size;bool amsdu;};
+struct rtw89_dev {struct {unsigned chip_id,bacam_dynamic_num;} *chip;struct {uint8_t tx_nss,rx_nss;} hal;};
+struct ieee80211_ampdu_params {enum ieee80211_ampdu_mlme_action action;struct ieee80211_sta *sta;u16 tid,ssn,buf_size;bool amsdu;};
 struct sk_buff {uint8_t data[128];size_t len;struct list_head list;};
 static struct ieee80211_channel channel;
-static struct ieee80211_supported_band band={4,{{10},{20},{60},{120}}};
-static struct wiphy phy={true,{&band}};
+static struct ieee80211_supported_band band={4,{{10},{20},{60},{120}},{true,0x01e3,3,4,{{0xff,0xff}}},{true,0x038001b0,{0xfffa,0xfffa}}};
+static struct wiphy phy={true,{&band,&band,NULL}};
 static __typeof__(*((struct rtw89_dev *)0)->chip) chip={RTL8852B,4};
-static struct rtw89_dev device={&chip};static struct ieee80211_hw hardware={&phy,&device,4};
-static struct ieee80211_vif aux={{2,1,2,3,4,5}},*owly_core04c_vif=&aux;
+static struct rtw89_dev device={&chip,{2,2}};static struct ieee80211_hw hardware={&phy,&device,4};
+static struct ieee80211_vif aux={{2,1,2,3,4,5},{{{&channel,NL80211_CHAN_WIDTH_20}}}},*owly_core04c_vif=&aux;
 static struct {bool scanning,up;struct workqueue_struct *awdl_rx_wq;} glue;
 static struct owly_native_link owly_link_state;static spinlock_t owly_link_lock;
 static unsigned allocated,freed,delivered,wakes,flushes,sta_changes,fw_starts,fw_stops,stats,txs,packet_alloc,packet_free;
@@ -109,8 +142,11 @@ static int sta_state(struct ieee80211_hw *h,struct ieee80211_vif *v,struct ieee8
  return 0;}
 static void flush(struct ieee80211_hw *h,struct ieee80211_vif *v,unsigned mask,bool discard)
 {assert(h==&hardware && v==&aux && mask==15 && !discard && !rx_context);++flushes;}
+static int ampdu_action_cb(struct ieee80211_hw *h,struct ieee80211_vif *v,struct ieee80211_ampdu_params *a)
+{assert(h==&hardware && v==&aux && a && a->sta && phy.held && !rx_context);return 0;}
 static const struct {int (*sta_state)(struct ieee80211_hw *,struct ieee80211_vif *,struct ieee80211_sta *,enum ieee80211_sta_state,enum ieee80211_sta_state);
- void (*flush)(struct ieee80211_hw *,struct ieee80211_vif *,unsigned,bool);} ops={sta_state,flush};
+ void (*flush)(struct ieee80211_hw *,struct ieee80211_vif *,unsigned,bool);
+ int (*ampdu_action)(struct ieee80211_hw *,struct ieee80211_vif *,struct ieee80211_ampdu_params *);} ops={sta_state,flush,ampdu_action_cb};
 struct rtw89_m80211_local {__typeof__(&ops) ops;};static struct rtw89_m80211_local local={&ops};
 static struct rtw89_m80211_local *hw_to_local(struct ieee80211_hw *h){assert(h==&hardware);return &local;}
 static int rtw89_fw_h2c_ba_cam(struct rtw89_dev *d,struct rtw89_vif_link *v,struct rtw89_sta_link *sl,bool start,struct ieee80211_ampdu_params *a)

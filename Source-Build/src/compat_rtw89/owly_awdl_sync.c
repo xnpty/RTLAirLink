@@ -438,15 +438,23 @@ int owly_sync_frame(struct owly_sync *s,uint64_t now,uint8_t *f,size_t cap,size_
         s->mif_due_us=now+((uint64_t)until_slot+(follow ? 0u : 32u))*1024u;
     }
 #endif
-    /* Both sequence formats describe the AWDL data path's 20 MHz channel. */
+    /* Advertise the bound radio's actual bandwidth on 5 GHz (20/40/80 MHz). */
     v[33]=15; v[34]=1; v[35]=0; v[36]=3; v[37]=v[38]=255;
-    const uint8_t legacy_flags = s->channel == 6 ? 0x2b : 0x18;
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    const uint8_t bw = s->channel == 6 ? 20u : (s->channel_width ? s->channel_width : 20u);
+#else
+    const uint8_t bw = 20u;
+#endif
+    const uint8_t legacy_flags = s->channel == 6 ? 0x2b : (bw >= 40u ? 0x1d : 0x18);
+    const uint8_t legacy_ch = (s->channel != 6 && bw >= 40u) ? (uint8_t)(s->channel + 2u) : s->channel;
     const uint8_t operating_class = s->channel == 6 ? 0x51 :
-                                    s->channel == 44 ? 0x73 : 0x7c;
+                                    bw >= 80u ? 128u :
+                                    bw >= 40u ? (s->channel == 44 ? 116u : 126u) :
+                                    (s->channel == 44 ? 0x73 : 0x7c);
     for (i=0;i<16;i++) {
         if (!(advertised_slots & (1u << i))) continue;
         v[39+2*i]=legacy_flags;
-        v[40+2*i]=s->channel;
+        v[40+2*i]=legacy_ch;
     }
     pos=40u+3u+SYNC_PARAMS_WIRE_LEN;
     f[pos]=18; put16(f+pos+1,CHANNEL_SEQUENCE_WIRE_LEN); v=f+pos+3;

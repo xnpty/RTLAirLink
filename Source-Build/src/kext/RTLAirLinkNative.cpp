@@ -635,8 +635,12 @@ uint32_t RTLAirLink::backNativeOutput(void *ctx,mbuf_t m)
     size_t n=mbuf_pkthdr_len(m);int rc=-ENETDOWN;
     if(self && self->_native && self->_ns && !self->_nativeClosing &&
        !self->_halting && !self->_asleep && self->_ns->airlink.enabled && n>=14 && n<=2062) {
-        Scratch copied(n);
-        if(copied.p && !mbuf_copydata(m,0,n,copied.p))rc=rtw89_glue_native_output(copied.bytes(),n);
+        if (mbuf_len(m) >= n) {
+            rc = rtw89_glue_native_output(static_cast<const uint8_t *>(mbuf_data(m)), n);
+        } else {
+            Scratch copied(n);
+            if(copied.p && !mbuf_copydata(m,0,n,copied.p))rc=rtw89_glue_native_output(copied.bytes(),n);
+        }
     }
     mbuf_freem(m); /* all statuses consume once; bounded queue copies before returning */
     if(self)self->setProperty("OwlyNativeTXEnqueueResult",static_cast<unsigned long long>(static_cast<uint32_t>(rc)),32);
@@ -1959,6 +1963,16 @@ int RTLAirLink::nativeRequest(bool isSet, int number, void *data)
         const int rc=rtw89_glue_awdl_ht_capability(data,sizeof(apple80211_ht_capability));
         setProperty("OwlyAWDLHTCapabilityResult",static_cast<unsigned long long>(static_cast<uint32_t>(-rc)),32);
         if (!rc) setProperty("OwlyAWDLHTCapabilityIE",static_cast<uint8_t *>(data)+4,28);
+        return rc ? -rc : kIOReturnSuccess;
+    }
+    case APPLE80211_IOC_VHT_CAPABILITY: {
+        /* Legacy4C GET214 copies bytes 4..17 (14-byte EID191/len12 VHT IE)
+         * and builds AWDL TLV17. Write exactly 18 bytes so both 18-byte and
+         * 20-byte caller buffers stay safe. */
+        if (isSet) return kIOReturnUnsupported;
+        const int rc=rtw89_glue_awdl_vht_capability(data,18);
+        setProperty("OwlyAWDLVHTCapabilityResult",static_cast<unsigned long long>(static_cast<uint32_t>(-rc)),32);
+        if (!rc) setProperty("OwlyAWDLVHTCapabilityIE",static_cast<uint8_t *>(data)+4,14);
         return rc ? -rc : kIOReturnSuccess;
     }
     case APPLE80211_IOC_PHY_MODE: {

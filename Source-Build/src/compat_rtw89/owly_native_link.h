@@ -9,7 +9,7 @@
  * A peer here is observed link-layer state, not authenticated AirDrop identity.
  * Host RX time gives software timing; it is not a hardware TSF measurement. */
 #define OWLY_LINK_PEERS 8u
-#define OWLY_LINK_QUEUE 32u
+#define OWLY_LINK_QUEUE 128u
 #define OWLY_LINK_FRAME_MAX 2048u
 #define OWLY_LINK_PEER_TTL_US 2000000ull
 #define OWLY_LINK_AW_US 16384ull
@@ -21,7 +21,11 @@ struct owly_link_peer {
      * The exported owly_link_window below deliberately stays ABI7/20 bytes. */
     uint8_t election[24];
     int8_t rssi;
-    uint8_t ht_rx_mcs;
+    uint16_t ht_rx_mcs, ht_cap_info;
+    uint8_t ht_ampdu_params, max_channel_width;
+    bool has_vht_cap;
+    uint32_t vht_cap_info;
+    uint16_t vht_rx_mcs_map, vht_tx_mcs_map;
     uint16_t next_seq, consistent;
     uint8_t outliers;  /* samples ignored in a row while the clock held */
     uint64_t last_rx_us, clock_rx_us, anchor_us, last_mif_rx_us, last_data_rx_us;
@@ -74,7 +78,7 @@ struct owly_native_link {
     struct owly_link_frame queue[OWLY_LINK_QUEUE];
     unsigned head, count;
     uint8_t queue_order[OWLY_LINK_QUEUE];
-    uint32_t queue_used;
+    uint64_t queue_used[2];
     uint64_t actions, rejected_actions, data_rx_admitted, data_rx_rejected;
     uint64_t tx_enqueued, tx_handoffs, tx_refused, tx_expired, tx_radio_acked;
     /* Why a peer's clock was or was not taken: diagnostics only. */
@@ -123,6 +127,8 @@ bool owly_link_clock(struct owly_native_link *s,uint64_t now,uint16_t *seq,
 int owly_link_build_tx(const uint8_t *eth,size_t len,const uint8_t local[6],
                        uint16_t wifi_seq,uint16_t awdl_seq,
                        uint8_t *out,size_t cap,size_t *out_len);
+bool owly_link_promote_qos(uint8_t *frame,size_t *length,size_t cap,
+                           uint16_t qos_sn,uint8_t tid);
 bool owly_link_data_busy(const struct owly_native_link *s,uint64_t now);
 int owly_link_enqueue(struct owly_native_link *s,const uint8_t *eth,size_t len,
                       uint64_t now);

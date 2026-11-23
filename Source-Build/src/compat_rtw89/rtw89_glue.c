@@ -2034,8 +2034,9 @@ void rtw89_glue_test_rx_parked(const u8 *frame, size_t len, u16 freq, s8 signal,
 static void glue_tx_status(void *ctx, struct sk_buff *skb)
 {
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
-    if(skb && skb->len>=81u && skb->data[0]==8u &&
+    if(skb && skb->len>=81u && (skb->data[0]==8u || skb->data[0]==0x88u) &&
        !memcmp(skb->data+16,"\x00\x25\x00\xff\x94\x73",6)) {
+        const size_t ip_off = skb->data[0]==0x88u ? 42u : 40u;
         const bool multicast=(skb->data[4]&1u)!=0;
         const bool done=(IEEE80211_SKB_CB(skb)->flags&IEEE80211_TX_STAT_ACK)!=0;
         spin_lock(&owly_link_lock);
@@ -2044,11 +2045,10 @@ static void glue_tx_status(void *ctx, struct sk_buff *skb)
         spin_unlock(&owly_link_lock);
         if(local) {
             static volatile unsigned long mdns_reports,other_reports;
-            /* The TX builder puts IPv6 at offset 40. Read only its
-             * next-header byte and the two UDP ports. */
-            const bool mdns=skb->len>=88u && skb->data[46]==17u &&
-                (get_unaligned_be16(skb->data+80)==5353u ||
-                 get_unaligned_be16(skb->data+82)==5353u);
+            /* The TX builder puts IPv6 at offset 40 (Non-QoS) or 42 (QoS). */
+            const bool mdns=skb->len>=ip_off+48u && skb->data[ip_off+6]==17u &&
+                (get_unaligned_be16(skb->data+ip_off+40)==5353u ||
+                 get_unaligned_be16(skb->data+ip_off+42)==5353u);
             const unsigned long count=__sync_add_and_fetch(
                 mdns ? &mdns_reports : &other_reports,1ul);
             if(count<=16ul || !(count&(count-1ul)))
@@ -3368,7 +3368,8 @@ static void owly_mc_kick(void)
 }
 #endif
 
-static int owly_sync_submit(struct ieee80211_channel *ch,const uint8_t *p,size_t n,bool data)
+static int owly_sync_write_frame(struct ieee80211_channel *ch,const uint8_t *p,size_t n,
+                                 bool data,bool ampdu,int *doorbell)
 {
     struct ieee80211_hw *hw=glue_hw();
     struct ieee80211_supported_band *band;
@@ -3381,6 +3382,8 @@ static int owly_sync_submit(struct ieee80211_channel *ch,const uint8_t *p,size_t
     if (!band || !owly_core04c_vif || n<24 || n>OWLY_SYNC_FRAME_MAX)
         return -EOPNOTSUPP;
 #if !defined(OWLY_NATIVE_PEER_DATA) || !OWLY_NATIVE_PEER_DATA
+    (void)ampdu;
+    (void)doorbell;
     struct rtw89_m80211_local *local=hw_to_local(hw);
     if (!local->ops->tx)
         return -EOPNOTSUPP;
@@ -3397,35 +3400,33 @@ static int owly_sync_submit(struct ieee80211_channel *ch,const uint8_t *p,size_t
     if (!skb) return -ENOMEM;
     skb_reserve(skb,hw->extra_tx_headroom);
     memcpy(skb_put(skb,(unsigned int)n),p,n);
+    const bool is_qos = skb->data[0] == 0x88u;
 #if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
-    if(!owly_radio_assign_sequence(&owly_radio_tx_sequence,skb->data,n)) {
+    if(!is_qos && !owly_radio_assign_sequence(&owly_radio_tx_sequence,skb->data,n)) {
         kfree_skb(skb);return -EINVAL;
     }
     static unsigned long sequence_samples;
     const unsigned long sample=++sequence_samples;
     if(sample<=8ul || !(sample&(sample-1ul)))
         IOLog("OWLY radio TX sequence: count=%lu kind=%s wifi_seq=%u ch=%u bytes=%lu\n",
-            sample,data ? "data" : "action",(unsigned)(get_unaligned_le16(skb->data+22)>>4),
+            sample,is_qos ? "qos-ampdu" : data ? "data" : "action",
+            (unsigned)(get_unaligned_le16(skb->data+22)>>4),
             (unsigned)ch->hw_value,(unsigned long)n);
 #endif
     info=IEEE80211_SKB_CB(skb); memset(info,0,sizeof(*info));
     const bool unicast=!(p[4]&1u);
     info->flags=IEEE80211_TX_INTFL_DONT_ENCRYPT | IEEE80211_TX_CTL_NO_ACK |
                 IEEE80211_TX_CTL_INJECTED;
-    if(data) info->flags|=IEEE80211_TX_CTL_REQ_TX_STATUS;
+    if(data && !is_qos) info->flags|=IEEE80211_TX_CTL_REQ_TX_STATUS;
     if(unicast) info->flags&=~IEEE80211_TX_CTL_NO_ACK;
+    if(is_qos && ampdu && unicast) info->flags|=IEEE80211_TX_CTL_AMPDU;
     info->control.vif=owly_core04c_vif;
     info->control.rates[0].idx=(s8)rate;
     info->control.rates[0].count=unicast ? 3 : 1;
     info->band=ch->band;
-    /* Match mac80211 selection for this fully formed frame: management
-     * uses VO/7, non-QoS data uses BE/0. Never invent a QoS TID for data
-     * whose supplied 802.11 header has no QoS control field. */
     const unsigned int ac=data ? IEEE80211_AC_BE : IEEE80211_AC_VO;
     info->hw_queue=owly_core04c_vif->hw_queue[ac];
     skb->priority=data ? 0 : 7; skb_set_queue_mapping(skb,ac);
-    /* Keep 6 Mbps as the injected-frame default. The descriptor builder
-     * can use firmware rate control for data to a configured AWDL peer. */
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     int qsel;
     int rc=rtw89_core_tx_write(rtwdev,owly_core04c_vif,
@@ -3440,12 +3441,23 @@ static int owly_sync_submit(struct ieee80211_channel *ch,const uint8_t *p,size_t
         owly_unicast_note(0,ip,size,0,false); /* DMA submission, not peer receipt */
     }
 #endif
-    rtw89_core_tx_kick_off(rtwdev,qsel);
+    if (doorbell) {
+        if (*doorbell >= 0 && *doorbell != qsel)
+            rtw89_core_tx_kick_off(rtwdev, *doorbell);
+        *doorbell = qsel;
+    } else {
+        rtw89_core_tx_kick_off(rtwdev,qsel);
+    }
 #else
     struct ieee80211_tx_control control={.sta=NULL};
     local->ops->tx(hw,&control,skb);
 #endif
     return 0;
+}
+
+static int owly_sync_submit(struct ieee80211_channel *ch,const uint8_t *p,size_t n,bool data)
+{
+    return owly_sync_write_frame(ch,p,n,data,false,NULL);
 }
 
 static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
@@ -3478,6 +3490,7 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
     owly_sync_state.have_master_election=owly_link_root_election(
         &owly_link_state,now,owly_sync_state.master_election);
     owly_sync_state.shared_slots=owly_link_shared_slots(&owly_link_state,now);
+    owly_sync_state.channel_width=owly_peer_bound_width();
     owly_sync_state.hold_for_peer=!owly_link_action_tx_ready(&owly_link_state,now);
     if (owly_sync_state.pending_mi.length) {
         const uint8_t *destination=owly_sync_state.pending_mi_destination;
@@ -3513,9 +3526,13 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
                   (unsigned)owly_sync_state.channel,(unsigned)length,rc);
     }
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
-    /* Each frame still needs its own valid transmit window. A broadcast
-     * MIF for another peer must not hold an otherwise ready reply. */
-    for(unsigned int i=0;i<4 && owly_sync_state.active;i++) {
+    /* Drain a full burst of ready frames in one pass and ring one PCI
+     * doorbell so RTL8852BE hardware can pack consecutive QoS MPDUs into
+     * a single A-MPDU TXOP. */
+    const unsigned int budget = owly_peer_turbo ? 32u : 4u;
+    unsigned int sent = 0;
+    int doorbell = -1;
+    for(unsigned int i=0;i<budget && owly_sync_state.active;i++) {
         unsigned int offset;
         uint64_t generation;
         spin_lock(&owly_link_lock);
@@ -3524,26 +3541,44 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
                              sizeof(owly_link_txbuf),&length,&offset,&generation);
         spin_unlock(&owly_link_lock);
         if(rc!=1)break;
-        rc=owly_sync_submit(ch,owly_link_txbuf,length,true);
+        const bool unicast = !(owly_link_txbuf[4] & 1u);
+        bool ampdu = false;
+        if (unicast) {
+            owly_peer_note_unicast_tx(owly_link_txbuf + 4);
+            uint16_t qos_sn = 0;
+            if (owly_peer_tx_ampdu_peek(owly_link_txbuf + 4, &qos_sn) &&
+                owly_link_promote_qos(owly_link_txbuf, &length,
+                                      sizeof(owly_link_txbuf), qos_sn, 0u))
+                ampdu = true;
+        }
+        rc=owly_sync_write_frame(ch,owly_link_txbuf,length,true,ampdu,&doorbell);
+        if (!rc && ampdu)
+            owly_peer_tx_ampdu_commit(owly_link_txbuf + 4);
         spin_lock(&owly_link_lock);
         owly_link_tx_result(&owly_link_state,offset,generation,rc);
         spin_unlock(&owly_link_lock);
         if(rc)break;
+        ++sent;
     }
+    if (doorbell >= 0)
+        rtw89_core_tx_kick_off(glue_hw()->priv, doorbell);
 #endif
     if (owly_sync_state.active) {
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
         spin_lock(&owly_link_lock);
         const bool queued=owly_link_state.count!=0;
         spin_unlock(&owly_link_lock);
-        const unsigned poll_delay=owly_awdl_poll_delay_us(glue_now_us(),
+        unsigned poll_delay=owly_awdl_poll_delay_us(glue_now_us(),
             owly_sync_state.due_us,owly_sync_state.mif_due_us,
             queued,owly_sync_state.pending_mi.length!=0,
             owly_sync_state.hold_for_peer,owly_sync_state.peer_clock.until_next_tu);
+        if (owly_peer_turbo && queued && sent)
+            poll_delay = sent >= budget ? 0u : 250u;
 #else
         const unsigned poll_delay=16384;
 #endif
-        wiphy_delayed_work_queue(wiphy,&owly_sync_work,usecs_to_jiffies(poll_delay));
+        wiphy_delayed_work_queue(wiphy,&owly_sync_work,
+            poll_delay ? usecs_to_jiffies(poll_delay) : 0);
     }
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     /* Channel changes belong to separate serialized wiphy work, never RX
@@ -3658,17 +3693,53 @@ int rtw89_glue_awdl_ht_capability(void *output,size_t capacity)
     if (!output || capacity<OWLY_AWDL_HT_REPLY_BYTES) return -EINVAL;
     if (!glue.active || !glue.probed) return -ENODEV;
     mutex_lock(&glue.cmd_lock);wiphy_lock(glue_hw()->wiphy);
-    bool supported=false,valid=true;uint8_t mcs=255,density=0;
+    const struct rtw89_dev *rtwdev = glue_hw()->priv;
+    const bool two_streams = rtwdev && rtwdev->hal.tx_nss >= 2u && rtwdev->hal.rx_nss >= 2u;
+    bool supported=false,valid=true;
+    uint16_t mcs = two_streams ? UINT16_MAX : UINT8_MAX;
+    uint16_t cap_info = 0x01e3u;
+    uint8_t density=0, factor=3u;
     for (unsigned i=NL80211_BAND_2GHZ;i<=NL80211_BAND_5GHZ;i++) {
         const struct ieee80211_supported_band *band=glue_hw()->wiphy->bands[i];
         if (!band) continue;
         supported=true;
         if (!band->ht_cap.ht_supported) {valid=false;break;}
-        mcs &= band->ht_cap.mcs.rx_mask[0];
+        mcs &= (uint16_t)(band->ht_cap.mcs.rx_mask[0] |
+                          ((uint16_t)band->ht_cap.mcs.rx_mask[1] << 8));
+        cap_info &= (uint16_t)band->ht_cap.cap;
+        if (band->ht_cap.ampdu_factor < factor) factor = band->ht_cap.ampdu_factor;
         if (band->ht_cap.ampdu_density>density) density=band->ht_cap.ampdu_density;
     }
-    const int rc=supported && valid && owly_awdl_build_ht(output,capacity,mcs,density) ?
+    const int rc=supported && valid &&
+        owly_awdl_build_ht_full(output,capacity,mcs,factor,density,cap_info) ?
         0:-EOPNOTSUPP;
+    wiphy_unlock(glue_hw()->wiphy);mutex_unlock(&glue.cmd_lock);
+    return rc;
+#else
+    (void)output;(void)capacity;return -EOPNOTSUPP;
+#endif
+}
+int rtw89_glue_awdl_vht_capability(void *output,size_t capacity)
+{
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (!output || capacity<OWLY_AWDL_VHT_REPLY_BYTES) return -EINVAL;
+    if (!glue.active || !glue.probed) return -ENODEV;
+    mutex_lock(&glue.cmd_lock);wiphy_lock(glue_hw()->wiphy);
+    const struct rtw89_dev *rtwdev = glue_hw()->priv;
+    const struct ieee80211_supported_band *band = glue_hw()->wiphy->bands[NL80211_BAND_5GHZ];
+    int rc = -EOPNOTSUPP;
+    if (rtwdev && band && band->vht_cap.vht_supported) {
+        const uint8_t max_nss = rtwdev->hal.tx_nss < rtwdev->hal.rx_nss ?
+            rtwdev->hal.tx_nss : rtwdev->hal.rx_nss;
+        uint16_t rx_map = le16_to_cpu(band->vht_cap.vht_mcs.rx_mcs_map);
+        uint16_t tx_map = le16_to_cpu(band->vht_cap.vht_mcs.tx_mcs_map);
+        for (unsigned s = max_nss; s < 8u; ++s) {
+            rx_map |= (uint16_t)(3u << (s * 2u));
+            tx_map |= (uint16_t)(3u << (s * 2u));
+        }
+        if (owly_awdl_build_vht(output, capacity, band->vht_cap.cap, rx_map, tx_map))
+            rc = 0;
+    }
     wiphy_unlock(glue_hw()->wiphy);mutex_unlock(&glue.cmd_lock);
     return rc;
 #else
@@ -3824,6 +3895,25 @@ int rtw89_glue_awdl_action_rssi(bool enabled)
         if (owly_sync_state.active)
             wiphy_delayed_work_queue(hw->wiphy, &owly_sync_work, 0);
         IOLog("RTLAirLink AWDL action RSSI %s\n", enabled ? "enabled" : "disabled");
+    }
+    wiphy_unlock(hw->wiphy);
+    mutex_unlock(&glue.cmd_lock);
+    return 0;
+}
+
+int rtw89_glue_awdl_turbo(bool enabled)
+{
+    if (!glue.active || !glue.probed) return -ENODEV;
+    struct ieee80211_hw *hw = glue_hw();
+    mutex_lock(&glue.cmd_lock);
+    wiphy_lock(hw->wiphy);
+    if (owly_peer_turbo != enabled) {
+        owly_peer_turbo = enabled;
+        owly_peer_check_us = 0;
+        if (owly_sync_state.active)
+            wiphy_delayed_work_queue(hw->wiphy, &owly_sync_work, 0);
+        IOLog("RTLAirLink AWDL turbo (VHT80/2SS/TX-AMPDU) %s\n",
+              enabled ? "enabled" : "disabled");
     }
     wiphy_unlock(hw->wiphy);
     mutex_unlock(&glue.cmd_lock);

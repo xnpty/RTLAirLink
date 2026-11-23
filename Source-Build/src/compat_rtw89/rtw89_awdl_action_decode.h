@@ -25,7 +25,13 @@ struct owly_action_info {
     unsigned char has_chanseq;
     unsigned char has_version;
     unsigned char has_ht_rx_mcs;
-    unsigned char ht_rx_mcs;
+    unsigned short ht_rx_mcs;
+    unsigned short ht_cap_info;
+    unsigned char ht_ampdu_params;
+    unsigned char has_vht_cap;
+    unsigned int vht_cap_info;
+    unsigned short vht_rx_mcs_map;
+    unsigned short vht_tx_mcs_map;
     unsigned char complete;     /* presence of key TLVs, NOT valid peer */
     unsigned char next_aw_channel;
     unsigned char master_channel;
@@ -36,6 +42,7 @@ struct owly_action_info {
     unsigned char device_class;
     unsigned char channel_encoding;
     unsigned char channels[16];
+    unsigned char channel_widths[16]; /* 20, 40, or 80 MHz per slot */
     unsigned char social_mask; /* bit0=6, bit1=44, bit2=149 */
     unsigned char tlv_count;
     unsigned char unknown_tlv_count;
@@ -118,12 +125,32 @@ owly_decode_action(const unsigned char *f, size_t len,
             d.aw_period_tu = owly_le16(v + 5);
             d.next_aw_seq = owly_le16(v + 29);
             break;
-        case 7: /* HT capabilities, one to four RX MCS octets. */
+        case 7: /* HT capabilities: compact (8..11 B) or full body (28 B). */
             ++ht_elements;
-            /* Two prefix bytes, HT Capabilities, A-MPDU parameters, then
-             * the RX MCS mask and two trailing bytes. Only use stream 1. */
-            d.has_ht_rx_mcs = ht_elements == 1u && value_len >= 8u && value_len <= 11u;
-            d.ht_rx_mcs = d.has_ht_rx_mcs ? v[5] : 0;
+            if (ht_elements == 1u &&
+                ((value_len >= 8u && value_len <= 11u) || value_len == 28u)) {
+                const unsigned short cap = owly_le16(v + 2);
+                const unsigned char mcs0 = v[5];
+                const unsigned char smps = (unsigned char)((cap >> 2) & 3u);
+                const unsigned char mcs1 = (value_len >= 9u && smps == 3u) ? v[6] : 0u;
+                d.has_ht_rx_mcs = 1u;
+                d.ht_cap_info = cap;
+                d.ht_ampdu_params = v[4];
+                d.ht_rx_mcs = (unsigned short)(mcs0 | ((unsigned short)mcs1 << 8));
+            } else {
+                d.has_ht_rx_mcs = 0u;
+                d.ht_cap_info = 0u;
+                d.ht_ampdu_params = 0u;
+                d.ht_rx_mcs = 0u;
+            }
+            break;
+        case 17: /* VHT capabilities IE (EID 191, length 12 -> 14 bytes total). */
+            if (!d.has_vht_cap && value_len == 14u && v[0] == 0xbfu && v[1] == 0x0cu) {
+                d.has_vht_cap = 1u;
+                d.vht_cap_info = owly_le32(v + 2);
+                d.vht_rx_mcs_map = owly_le16(v + 6);
+                d.vht_tx_mcs_map = owly_le16(v + 10);
+            }
             break;
         case 18: /* Channel Sequence, 16 slots */
             if (d.has_chanseq || value_len < 6u || v[0] != 15u ||
@@ -137,13 +164,22 @@ owly_decode_action(const unsigned char *f, size_t len,
             for (i = 0; i < 16u; i++) {
                 const unsigned char *slot = v + 6u + i * stride;
                 unsigned char ch = slot[v[1] == 1 ? 1u : 0u];
+                unsigned char bw = 20u;
                 /* Apple's legacy 5 GHz entries use the 40 MHz center for
                  * these social channels. The SCC scheduler uses primaries. */
                 if (v[1] == 1 && slot[0] == 0x1du) {
                     if (ch == 46u) ch = 44u;
                     if (ch == 151u) ch = 149u;
+                    bw = 40u;
+                } else if (v[1] == 3) {
+                    const unsigned char oc = slot[1];
+                    if (oc == 128u || oc == 129u || oc == 130u)
+                        bw = 80u;
+                    else if (oc == 116u || oc == 117u || oc == 126u || oc == 127u)
+                        bw = 40u;
                 }
                 d.channels[i] = ch;
+                d.channel_widths[i] = ch ? bw : 0u;
                 if (ch == 6) d.social_mask |= 1u;
                 if (ch == 44) d.social_mask |= 2u;
                 if (ch == 149) d.social_mask |= 4u;

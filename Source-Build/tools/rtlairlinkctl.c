@@ -478,6 +478,21 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (!strcmp(command, "awdl-turbo")) {
+        if (argc != 3 || (strcmp(argv[2], "on") && strcmp(argv[2], "off"))) {
+            fprintf(stderr, "usage: rtlairlinkctl awdl-turbo on|off\n");
+            return 2;
+        }
+        kr = send_command(service, !strcmp(argv[2], "on") ? "awdl-turbo-on" : "awdl-turbo-off");
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "awdl-turbo failed: 0x%x%s\n", kr,
+                    kr == kIOReturnNotPrivileged ? " (run with sudo)" : "");
+            return 1;
+        }
+        printf("AWDL turbo %s\n", argv[2]);
+        return 0;
+    }
+
     if (!strcmp(command, "flush") && argc >= 3 &&
         (!strcmp(argv[2], "on") || !strcmp(argv[2], "off"))) {
         kr = send_command(service, !strcmp(argv[2], "on") ? "flush-on" : "flush-off");

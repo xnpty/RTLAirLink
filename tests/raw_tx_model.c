@@ -18,6 +18,7 @@ typedef uint32_t __le32;
 #define le16_to_cpu(x) (x)
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define umin(a,b) ((unsigned)(a)<(unsigned)(b)?(unsigned)(a):(unsigned)(b))
+#define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
 #define likely(x) (x)
 #define unlikely(x) (x)
 #define lockdep_assert_wiphy(x) ((void)(x))
@@ -36,12 +37,16 @@ enum mac80211_rate_control_flags { TEST_RATE_FLAGS_DUMMY=0 };
 #define RTL8852B 2
 #define ETH_ALEN 6
 #define IEEE80211_FTYPE_DATA 8
+#define IEEE80211_STYPE_QOS_DATA 0x80
 #define RTW89_CHANNEL_WIDTH_20 0
+#define RTW89_CHANNEL_WIDTH_80 2
 #define OWLY_SYNC_FRAME_MAX 2048
+#define test_bit(nr, addr) (((*(addr)) & (1UL << (nr))) != 0)
 enum rtw89_core_tx_type { RTW89_CORE_TX_TYPE_MGMT, RTW89_CORE_TX_TYPE_DATA, RTW89_CORE_TX_TYPE_FWCMD };
 enum btc_pkt_type { PACKET_MAX };
 struct ieee80211_vif { unsigned hw_queue[4]; bool p2p; };
-struct ieee80211_sta { bool mlo; };
+struct ieee80211_link_sta { struct { u8 ampdu_factor, ampdu_density; } ht_cap; };
+struct ieee80211_sta { bool mlo; struct ieee80211_link_sta deflink; };
 struct ieee80211_hdr { __le16 frame_control, duration; u8 addr1[6],addr2[6],addr3[6]; __le16 seq_ctrl; };
 struct ieee80211_tx_info {
  u32 flags; unsigned band,hw_queue;
@@ -55,7 +60,7 @@ struct rtw89_vif_link {
  unsigned chanctx_idx, port;
  u8 mac_addr[ETH_ALEN];
 };
-struct rtw89_sta { bool owly_awdl; };
+struct rtw89_sta { bool owly_awdl; unsigned long ampdu_map[1]; struct { u16 agg_num; } ampdu_params[16]; };
 struct rtw89_sta_link {
  struct rtw89_sta *rtwsta;
  unsigned mac_id;
@@ -63,7 +68,7 @@ struct rtw89_sta_link {
  struct { unsigned macid, bw_cap; uint64_t ra_mask; } ra;
 };
 struct rtw89_vif { struct { void *next,*prev; } dlink_pool; };
-struct rtw89_chan { unsigned band_type; };
+struct rtw89_chan { unsigned band_type, band_width; };
 struct rtw89_hw_rate_def { unsigned ht,vht[4]; };
 static const struct rtw89_hw_rate_def rtw89_hw_rate[2] = {{128,{256,266,276,286}},{128,{256,268,280,292}}};
 struct test_chip { unsigned chip_gen, chip_id; };
@@ -76,7 +81,7 @@ struct rtw89_tx_desc_info {
  bool use_rate,dis_data_fb,hw_rts_en,rts_en,no_ack,upd_wlan_hdr,mlo,sw_mld;
  bool is_bmc,wd_page,hiq,report,tx_cnt_lmt_en,en_wd_info,stbc,ldpc,fw_dl,agg_en,bk,a_ctrl_bsr;
  unsigned hw_ssn_sel,hw_seq_mode,tx_cnt_lmt,data_rate,data_retry_lowest_rate,data_bw,gi_ltf;
- unsigned seq,pkt_size,hdr_llc_len,wp_offset,ch_dma,mac_id,tid_indicate,qsel,port,ampdu_num,sn;
+ unsigned seq,pkt_size,hdr_llc_len,wp_offset,ch_dma,mac_id,tid_indicate,qsel,port,ampdu_num,ampdu_density,sn;
 };
 struct rtw89_core_tx_request {
  struct sk_buff *skb; struct ieee80211_vif *vif; struct ieee80211_sta *sta;
@@ -201,6 +206,26 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
  CHECK(last_desc.use_rate && last_desc.dis_data_fb);
  rate_link.ra.bw_cap=RTW89_CHANNEL_WIDTH_20;
+ /* Verify 80 MHz VHT + QoS TX A-MPDU descriptor path. */
+ dev.channel.band_width=RTW89_CHANNEL_WIDTH_80;
+ rate_link.ra.bw_cap=RTW89_CHANNEL_WIDTH_80;
+ rate_peer.ampdu_map[0]=1UL;
+ rate_peer.ampdu_params[0].agg_num=64;
+ peer.deflink.ht_cap.ampdu_density=5;
+ struct sk_buff q=frame(IEEE80211_FTYPE_DATA|IEEE80211_STYPE_QOS_DATA,flags);
+ q.bytes[24]=0;q.bytes[25]=0;
+ memcpy(q.bytes+26,snap,sizeof(snap));
+ q.len=110;
+ int doorbell=-1;
+ CHECK(owly_sync_write_frame(ch,q.bytes,q.len,true,true,&doorbell)==0);
+ CHECK(doorbell==IEEE80211_AC_BE);
+ CHECK(!last_desc.use_rate && !last_desc.dis_data_fb);
+ CHECK(last_desc.agg_en && last_desc.ampdu_num==63 && last_desc.ampdu_density==5);
+ CHECK(last_desc.hw_rts_en && last_desc.rts_en && last_desc.tx_cnt_lmt==6);
+ CHECK(!last_desc.hw_seq_mode && !last_desc.hw_ssn_sel && last_desc.seq==0x123);
+ dev.channel.band_width=RTW89_CHANNEL_WIDTH_20;
+ rate_link.ra.bw_cap=RTW89_CHANNEL_WIDTH_20;
+ rate_peer.ampdu_map[0]=0;
  rate_peer.owly_awdl=false;
  CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
  CHECK(last_desc.use_rate && last_desc.dis_data_fb);
