@@ -799,6 +799,8 @@ IOReturn RTLAirLink::setProperties(OSObject *properties)
             ret = rtw89_glue_awdl_rx_sample_start(static_cast<const uint8_t *>(peer->getBytesNoCopy()));
     } else if (command->isEqualTo("awdl-rx-sample-stop")) {
         rtw89_glue_awdl_rx_sample_stop();
+    } else if (command->isEqualTo("awdl-rssi-on") || command->isEqualTo("awdl-rssi-off")) {
+        ret = rtw89_glue_awdl_action_rssi(command->isEqualTo("awdl-rssi-on"));
 #endif
     } else if (command->isEqualTo("up")) {
         LOG("radio up");

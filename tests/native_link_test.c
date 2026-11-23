@@ -109,6 +109,14 @@ static void peers(void) {
     }
     uint64_t now=2000000+3*7*16384;
     CHECK(owly_link_window(&link_state,now,&w) && w.remote);
+    const struct owly_link_peer *peer=&link_state.peers[0];
+    CHECK(owly_link_peer_action_rssi(peer,now)==-45);
+    CHECK(owly_link_peer_action_rssi(peer,now-1)==0);
+    CHECK(owly_link_peer_action_rssi(peer,now+OWLY_LINK_PEER_TTL_US)==-45);
+    struct owly_link_peer data_only=*peer;
+    data_only.last_data_rx_us=now+OWLY_LINK_PEER_TTL_US+1;
+    CHECK(owly_link_peer_alive(&data_only,data_only.last_data_rx_us));
+    CHECK(owly_link_peer_action_rssi(&data_only,data_only.last_data_rx_us)==0);
     CHECK(!memcmp(w.master,remote,6));
     CHECK(w.sequence==(uint16_t)((1000000+3*7*16384)/16384));
     uint8_t source[6];memcpy(source,remote,6);size_t e=ethernet(false);

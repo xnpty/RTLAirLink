@@ -200,6 +200,7 @@ int rtw89_glue_awdl_sync_template(const uint8_t *bytes, size_t length);
 int rtw89_glue_awdl_mi(bool automatic, const uint8_t destination[6],
                        const uint8_t *bytes, size_t length);
 int rtw89_glue_awdl_vif_disable(void);
+int rtw89_glue_awdl_action_rssi(bool enabled);
 int rtw89_glue_awdl_rx_sample_start(const uint8_t peer[6]);
 void rtw89_glue_awdl_rx_sample_stop(void);
 #endif

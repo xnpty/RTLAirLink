@@ -463,6 +463,21 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (!strcmp(command, "awdl-rssi")) {
+        if (argc != 3 || (strcmp(argv[2], "on") && strcmp(argv[2], "off"))) {
+            fprintf(stderr, "usage: rtlairlinkctl awdl-rssi on|off\n");
+            return 2;
+        }
+        kr = send_command(service, !strcmp(argv[2], "on") ? "awdl-rssi-on" : "awdl-rssi-off");
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "awdl-rssi failed: 0x%x%s\n", kr,
+                    kr == kIOReturnNotPrivileged ? " (run with sudo)" : "");
+            return 1;
+        }
+        printf("AWDL action RSSI %s\n", argv[2]);
+        return 0;
+    }
+
     if (!strcmp(command, "flush") && argc >= 3 &&
         (!strcmp(argv[2], "on") || !strcmp(argv[2], "off"))) {
         kr = send_command(service, !strcmp(argv[2], "on") ? "flush-on" : "flush-off");
@@ -504,7 +519,7 @@ int main(int argc, char **argv)
          strcmp(command, "drop")) ||
         (!strcmp(command, "join") && argc < 3)) {
         fprintf(stderr, "usage: rtlairlinkctl up|down|scan|join SSID|leave|status|log|coex|probe|drop|flush on|off|ax on|off|"
-                        "rejoin on|off|awdl-rx-sample PEER_MAC\n");
+                        "rejoin on|off|awdl-rx-sample PEER_MAC|awdl-rssi on|off\n");
         return 2;
     }
 

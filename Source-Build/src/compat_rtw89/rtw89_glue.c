@@ -3811,6 +3811,24 @@ int rtw89_glue_awdl_vif_disable(void)
 {
     return owly_set_sync_enabled(false,true);
 }
+
+int rtw89_glue_awdl_action_rssi(bool enabled)
+{
+    if (!glue.active || !glue.probed) return -ENODEV;
+    struct ieee80211_hw *hw = glue_hw();
+    mutex_lock(&glue.cmd_lock);
+    wiphy_lock(hw->wiphy);
+    if (owly_peer_use_action_rssi != enabled) {
+        owly_peer_use_action_rssi = enabled;
+        owly_peer_check_us = 0;
+        if (owly_sync_state.active)
+            wiphy_delayed_work_queue(hw->wiphy, &owly_sync_work, 0);
+        IOLog("RTLAirLink AWDL action RSSI %s\n", enabled ? "enabled" : "disabled");
+    }
+    wiphy_unlock(hw->wiphy);
+    mutex_unlock(&glue.cmd_lock);
+    return 0;
+}
 #endif
 
 int rtw89_glue_awdl_sync_status(struct rtw89_glue_awdl_sync_status *out)

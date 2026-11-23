@@ -32,6 +32,14 @@ static inline bool owly_link_peer_alive(const struct owly_link_peer *p,uint64_t 
     const uint64_t last=p->last_data_rx_us>p->last_rx_us ? p->last_data_rx_us:p->last_rx_us;
     return p->used && now>=last && now-last<=OWLY_LINK_PEER_TTL_US;
 }
+/* Recent data can keep a peer alive without refreshing its action RSSI. */
+static inline int8_t owly_link_peer_action_rssi(const struct owly_link_peer *p, uint64_t now)
+{
+    if (!p->used || !p->last_rx_us || now < p->last_rx_us ||
+        now - p->last_rx_us > OWLY_LINK_PEER_TTL_US)
+        return 0;
+    return p->rssi;
+}
 enum owly_link_tx_kind {
     OWLY_LINK_TX_OTHER,
     OWLY_LINK_TX_MDNS_QUERY,

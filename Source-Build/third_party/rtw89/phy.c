@@ -319,6 +319,18 @@ static void rtw89_phy_ra_gi_ltf(struct rtw89_dev *rtwdev,
 		*fix_giltf = RTW89_GILTF_1XHE08;
 }
 
+static u8 rtw89_phy_ra_rssi(struct rtw89_sta_link *rtwsta_link)
+{
+	u8 signal = ewma_rssi_read(&rtwsta_link->avg_rssi);
+
+#if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+	/* AWDL RX can use the auxiliary VIF's CAM instead of the peer CAM. */
+	if (!signal && rtwsta_link->rtwsta->owly_awdl)
+		signal = READ_ONCE(rtwsta_link->owly_awdl_action_rssi);
+#endif
+	return signal;
+}
+
 static void rtw89_phy_ra_sta_update(struct rtw89_dev *rtwdev,
 				    struct rtw89_vif_link *rtwvif_link,
 				    struct rtw89_sta_link *rtwsta_link,
@@ -330,7 +342,7 @@ static void rtw89_phy_ra_sta_update(struct rtw89_dev *rtwdev,
 	const struct rtw89_chan *chan = rtw89_chan_get(rtwdev,
 						       rtwvif_link->chanctx_idx);
 	const u64 *high_rate_masks = rtw89_ra_mask_ht_rates;
-	u8 rssi = ewma_rssi_read(&rtwsta_link->avg_rssi);
+	u8 rssi = rtw89_phy_ra_rssi(rtwsta_link);
 	u64 ra_mask = 0;
 	u64 ra_mask_bak;
 	u8 mode = 0;
@@ -738,7 +750,7 @@ void rtw89_phy_ra_assoc(struct rtw89_dev *rtwdev, struct rtw89_sta_link *rtwsta_
 	struct rtw89_vif_link *rtwvif_link = rtwsta_link->rtwvif_link;
 	struct ieee80211_vif *vif = rtwvif_link_to_vif(rtwvif_link);
 	struct rtw89_ra_info *ra = &rtwsta_link->ra;
-	u8 rssi = ewma_rssi_read(&rtwsta_link->avg_rssi) >> RSSI_FACTOR;
+	u8 rssi = rtw89_phy_ra_rssi(rtwsta_link) >> RSSI_FACTOR;
 	struct ieee80211_link_sta *link_sta;
 	bool csi;
 
@@ -3343,6 +3355,19 @@ static void __rtw89_phy_c2h_ra_rpt_iter(struct rtw89_sta_link *rtwsta_link,
 			     u16_encode_bits(rate, RTW89_HW_RATE_MASK_VAL);
 	ra_report->retry_ratio = retry_ratio;
 	ra_report->might_fallback_legacy = mcs <= 2;
+
+#if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+	if (rtwsta_link->rtwsta->owly_awdl) {
+		u32 reports = ++rtwsta_link->owly_awdl_ra_reports;
+
+		if (reports <= 8 || !(reports & (reports - 1)))
+			IOLog("RTLAirLink AWDL firmware TX rate: macid=%u reports=%u mode=%u "
+			      "mcs=%u kbps=%u action_rssi_raw=%u\n",
+			      (unsigned)mac_id, reports, (unsigned)mode,
+			      (unsigned)ra_report->txrate.mcs, (unsigned)ra_report->bit_rate * 100u,
+			      (unsigned)READ_ONCE(rtwsta_link->owly_awdl_action_rssi));
+	}
+#endif
 
 	amsdu_len = get_max_amsdu_len(rtwdev, ra_report);
 	if (link_sta->agg.max_rc_amsdu_len != amsdu_len) {

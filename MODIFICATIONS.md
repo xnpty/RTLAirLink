@@ -4,6 +4,7 @@
 
 - Native AWDL unicast data can use firmware rate control when a 20 MHz peer rate table is available. The raw descriptor preserves the frame, sequence and retry limit. Management and multicast frames retain the 6 Mb/s rate.
 - The experimental HT20 profile uses the peer's advertised first-stream receive MCS mask. Its firmware mask also retains the peer's legacy OFDM fallback rates. The peer rate table is refreshed in place when that advertisement changes. [AWDL capability format](https://www.wireshark.org/docs/dfref/a/awdl_data.html)
+- When an AWDL peer's dedicated receive context lacks a signal measurement, its rate control uses RSSI from recent admitted AWDL action frames. The driver samples firmware TX rate reports. The experimental `rtlairlinkctl awdl-rssi on|off` command allows comparisons during one boot.
 
 ## 2026-11-21
 

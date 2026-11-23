@@ -4627,6 +4627,10 @@ struct rtw89_sta_link {
 	struct rtw89_ra_info ra;
 	struct rtw89_ra_report ra_report;
 	bool ra_configured;
+#if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+	u8 owly_awdl_action_rssi;
+	u32 owly_awdl_ra_reports;
+#endif
 	int max_agg_wait;
 	u8 prev_rssi;
 	struct ewma_rssi avg_rssi;

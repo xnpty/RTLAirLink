@@ -20,6 +20,7 @@ static spinlock_t owly_peer_lock;
 static uint64_t owly_peer_generation,owly_peer_check_us;
 static uint16_t owly_control_sequence;
 static bool owly_peer_fault,owly_peer_accepting;
+static bool owly_peer_use_action_rssi = true;
 static struct work_struct owly_peer_delivery_work;
 static struct {struct sk_buff *skb;uint64_t generation;} owly_peer_ready[128];
 static unsigned owly_peer_ready_head,owly_peer_ready_count;
@@ -172,19 +173,27 @@ static void owly_peer_set_ht_rates(struct ieee80211_sta *sta,uint8_t rx_mcs)
  sta->deflink.ht_cap.mcs.rx_mask[0]=rx_mcs;
 }
 
-static void owly_peer_refresh_ht_rates(struct owly_awdl_radio_peer *p,uint8_t rx_mcs)
+static uint8_t owly_peer_rate_rssi(int8_t signal)
 {
- if(p->blocked || p->state<IEEE80211_STA_ASSOC ||
-    p->sta->deflink.ht_cap.mcs.rx_mask[0]==rx_mcs)return;
+    if (!owly_peer_use_action_rssi || signal >= 0 || signal <= -MAX_RSSI)
+        return 0;
+    return (uint8_t)((MAX_RSSI + signal) << RSSI_FACTOR);
+}
+
+static void owly_peer_refresh_rates(struct owly_awdl_radio_peer *p,uint8_t rx_mcs,int8_t signal)
+{
+ if(p->blocked || p->state<IEEE80211_STA_ASSOC)return;
  struct rtw89_sta_link *link=sta_to_rtwsta(p->sta)->links[p->sta->deflink.link_id];
  if(!link)return;
+ WRITE_ONCE(link->owly_awdl_action_rssi,owly_peer_rate_rssi(signal));
+ if(p->sta->deflink.ht_cap.mcs.rx_mask[0]==rx_mcs)return;
  owly_peer_set_ht_rates(p->sta,rx_mcs);
  rtw89_phy_ra_assoc(glue_hw()->priv,link);
  IOLog("RTLAirLink AWDL peer rate update: HT20 RX MCS=0x%02x, rate table sent=%d\n",
        (unsigned)rx_mcs,link->ra_configured);
 }
 
-static int owly_peer_open(struct owly_awdl_radio_peer *p,const uint8_t mac[6],uint8_t ht_rx_mcs)
+static int owly_peer_open(struct owly_awdl_radio_peer *p,const uint8_t mac[6],uint8_t ht_rx_mcs,int8_t signal)
 {
  struct ieee80211_hw *hw=glue_hw();struct rtw89_m80211_local *local=hw_to_local(hw);
  struct ieee80211_sta *sta=rtw89_m80211_sta_alloc(owly_core04c_vif,mac);if(!sta)return -ENOMEM;
@@ -210,11 +219,18 @@ static int owly_peer_open(struct owly_awdl_radio_peer *p,const uint8_t mac[6],ui
    owly_peer_fault=true;
    if(p->state==IEEE80211_STA_AUTH){const int undo=local->ops->sta_state(hw,owly_core04c_vif,sta,IEEE80211_STA_AUTH,IEEE80211_STA_NONE);if(undo)IOLog("OWLY radio peer rollback refused: rc=%d\n",undo);p->state=IEEE80211_STA_NONE;}
    owly_peer_drop(p);return rc;
-  }p->state=next;
+  }
+  /* The link exists before the AUTH -> ASSOC transition programs its
+   * first rate table. */
+  if(next==IEEE80211_STA_AUTH){
+   struct rtw89_sta_link *link=sta_to_rtwsta(sta)->links[sta->deflink.link_id];
+   if(link)WRITE_ONCE(link->owly_awdl_action_rssi,owly_peer_rate_rssi(signal));
+  }
+  p->state=next;
  }
  rtw89_m80211_sta_set_uploaded(sta,true);struct rtw89_sta_link *sl=sta_to_rtwsta(sta)->links[sta->deflink.link_id];
- IOLog("RTLAirLink AWDL peer rate: HT20 RX MCS=0x%02x, rate table sent=%d\n",
-       (unsigned)ht_rx_mcs,sl->ra_configured);
+ IOLog("RTLAirLink AWDL peer rate: HT20 RX MCS=0x%02x, rate table sent=%d, action rssi raw=%u\n",
+       (unsigned)ht_rx_mcs,sl->ra_configured,(unsigned)sl->owly_awdl_action_rssi);
  IOLog("OWLY radio peer ready: peer=%02x:%02x:%02x:%02x:%02x:%02x macid=%u cam=%u (not IP/TLS proof)\n",
   mac[0],mac[1],mac[2],mac[3],mac[4],mac[5],(unsigned)sl->mac_id,(unsigned)sl->addr_cam.addr_cam_idx);return 0;
 }
@@ -279,7 +295,7 @@ static bool owly_peer_bar_rx(struct sk_buff *skb)
 static void owly_peer_tick(struct ieee80211_channel *ch)
 {
  lockdep_assert_wiphy(glue_hw()->wiphy);if(!ch || glue.scanning || !owly_core04c_vif || !glue.awdl_rx_wq)return;
- struct {uint8_t mac[6],ht_rx_mcs;} observed[OWLY_LINK_PEERS];
+ struct {uint8_t mac[6],ht_rx_mcs;int8_t action_rssi;} observed[OWLY_LINK_PEERS];
  uint8_t own[6];unsigned count=0;uint64_t generation;
  spin_lock(&owly_link_lock);
  const uint64_t now=glue_now_us();
@@ -288,7 +304,8 @@ static void owly_peer_tick(struct ieee80211_channel *ch)
   const struct owly_link_peer *p=&owly_link_state.peers[i];
   if(!owly_link_peer_alive(p,now))continue;
   memcpy(observed[count].mac,p->mac,6);
-  observed[count++].ht_rx_mcs=p->ht_rx_mcs;
+  observed[count].ht_rx_mcs=p->ht_rx_mcs;
+  observed[count++].action_rssi=owly_link_peer_action_rssi(p,now);
  }
  spin_unlock(&owly_link_lock);
  if(generation!=owly_peer_generation){owly_peer_close_all();spin_lock(&owly_peer_lock);owly_peer_generation=generation;spin_unlock(&owly_peer_lock);}
@@ -301,11 +318,11 @@ static void owly_peer_tick(struct ieee80211_channel *ch)
   if(!owly_peer_fault)for(unsigned j=0;j<count;j++){
    struct owly_awdl_radio_peer *p=owly_peer_find(observed[j].mac);
    if(p){
-    owly_peer_refresh_ht_rates(p,observed[j].ht_rx_mcs);
+    owly_peer_refresh_rates(p,observed[j].ht_rx_mcs,observed[j].action_rssi);
     continue;
    }
    for(unsigned i=0;i<OWLY_RADIO_PEERS;i++)if(!owly_radio_peers[i].sta){
-    const int rc=owly_peer_open(&owly_radio_peers[i],observed[j].mac,observed[j].ht_rx_mcs);
+    const int rc=owly_peer_open(&owly_radio_peers[i],observed[j].mac,observed[j].ht_rx_mcs,observed[j].action_rssi);
     if(rc)IOLog("OWLY radio peer create refused: rc=%d\n",rc);
     break;
    }
