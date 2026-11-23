@@ -9,7 +9,8 @@
  * A peer here is observed link-layer state, not authenticated AirDrop identity.
  * Host RX time gives software timing; it is not a hardware TSF measurement. */
 #define OWLY_LINK_PEERS 8u
-#define OWLY_LINK_QUEUE 128u
+#define OWLY_LINK_QUEUE 512u
+#define OWLY_LINK_QUEUE_WORDS ((OWLY_LINK_QUEUE + 63u) / 64u)
 #define OWLY_LINK_FRAME_MAX 2048u
 #define OWLY_LINK_PEER_TTL_US 2000000ull
 #define OWLY_LINK_AW_US 16384ull
@@ -77,8 +78,8 @@ struct owly_native_link {
     struct owly_link_peer peers[OWLY_LINK_PEERS];
     struct owly_link_frame queue[OWLY_LINK_QUEUE];
     unsigned head, count;
-    uint8_t queue_order[OWLY_LINK_QUEUE];
-    uint64_t queue_used[2];
+    uint16_t queue_order[OWLY_LINK_QUEUE];
+    uint64_t queue_used[OWLY_LINK_QUEUE_WORDS];
     uint64_t actions, rejected_actions, data_rx_admitted, data_rx_rejected;
     uint64_t tx_enqueued, tx_handoffs, tx_refused, tx_expired, tx_radio_acked;
     /* Why a peer's clock was or was not taken: diagnostics only. */

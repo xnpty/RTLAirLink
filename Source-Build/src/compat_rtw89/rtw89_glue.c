@@ -3529,7 +3529,7 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
     /* Drain a full burst of ready frames in one pass and ring one PCI
      * doorbell so RTL8852BE hardware can pack consecutive QoS MPDUs into
      * a single A-MPDU TXOP. */
-    const unsigned int budget = owly_peer_turbo ? 32u : 4u;
+    const unsigned int budget = owly_peer_turbo ? 64u : 4u;
     unsigned int sent = 0;
     int doorbell = -1;
     for(unsigned int i=0;i<budget && owly_sync_state.active;i++) {
@@ -3643,6 +3643,20 @@ int rtw89_glue_native_output(const uint8_t *eth,size_t n)
 {
     struct ieee80211_channel *ch;int rc;
     if(!glue.active || !glue.probed)return -ENODEV;
+    /* Unicast fast path: avoid blocking the network output thread behind
+     * cmd_lock/wiphy_lock while owly_sync_work_run is draining TX bursts. */
+    if (owly_peer_turbo && eth && n >= 55u && !(eth[0] & 1u)) {
+        spin_lock(&owly_link_lock);
+        if (owly_link_state.active && owly_link_state.sync_enabled) {
+            const unsigned prev_count = owly_link_state.count;
+            rc = owly_link_enqueue(&owly_link_state, eth, n, glue_now_us());
+            spin_unlock(&owly_link_lock);
+            if (!rc && prev_count == 0u)
+                wiphy_delayed_work_queue(glue_hw()->wiphy, &owly_sync_work, 0);
+            return rc;
+        }
+        spin_unlock(&owly_link_lock);
+    }
     mutex_lock(&glue.cmd_lock);wiphy_lock(glue_hw()->wiphy);
     ch=owly_sync_bound_channel();
     spin_lock(&owly_link_lock);

@@ -628,6 +628,27 @@ static int rtw89_cam_get_avail_addr_cam(struct rtw89_dev *rtwdev,
 	return 0;
 }
 
+#if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+static int rtw89_cam_get_high_addr_cam(struct rtw89_dev *rtwdev,
+				       u8 *addr_cam_idx)
+{
+	const struct rtw89_chip_info *chip = rtwdev->chip;
+	struct rtw89_cam_info *cam_info = &rtwdev->cam_info;
+	u8 limit = chip->acam_num > 32 ? 32 : chip->acam_num;
+	int i;
+
+	for (i = (int)limit - 1; i >= 0; i--) {
+		if (!test_bit(i, cam_info->addr_cam_map)) {
+			set_bit(i, cam_info->addr_cam_map);
+			*addr_cam_idx = (u8)i;
+			return 0;
+		}
+	}
+
+	return rtw89_cam_get_avail_addr_cam(rtwdev, addr_cam_idx);
+}
+#endif
+
 static u8 rtw89_get_addr_cam_entry_size(struct rtw89_dev *rtwdev)
 {
 	const struct rtw89_chip_info *chip = rtwdev->chip;
@@ -643,9 +664,10 @@ static u8 rtw89_get_addr_cam_entry_size(struct rtw89_dev *rtwdev)
 	}
 }
 
-int rtw89_cam_init_addr_cam(struct rtw89_dev *rtwdev,
-			    struct rtw89_addr_cam_entry *addr_cam,
-			    const struct rtw89_bssid_cam_entry *bssid_cam)
+static int __rtw89_cam_init_addr_cam(struct rtw89_dev *rtwdev,
+				     struct rtw89_addr_cam_entry *addr_cam,
+				     const struct rtw89_bssid_cam_entry *bssid_cam,
+				     bool prefer_high)
 {
 	u8 addr_cam_idx;
 	int i;
@@ -657,7 +679,14 @@ int rtw89_cam_init_addr_cam(struct rtw89_dev *rtwdev,
 		return 0;
 	}
 
+#if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+	ret = prefer_high ?
+	      rtw89_cam_get_high_addr_cam(rtwdev, &addr_cam_idx) :
+	      rtw89_cam_get_avail_addr_cam(rtwdev, &addr_cam_idx);
+#else
+	(void)prefer_high;
 	ret = rtw89_cam_get_avail_addr_cam(rtwdev, &addr_cam_idx);
+#endif
 	if (ret) {
 		rtw89_err(rtwdev, "failed to get available addr cam\n");
 		return ret;
@@ -681,6 +710,13 @@ int rtw89_cam_init_addr_cam(struct rtw89_dev *rtwdev,
 	addr_cam->bssid_cam_idx = bssid_cam->bssid_cam_idx;
 
 	return 0;
+}
+
+int rtw89_cam_init_addr_cam(struct rtw89_dev *rtwdev,
+			    struct rtw89_addr_cam_entry *addr_cam,
+			    const struct rtw89_bssid_cam_entry *bssid_cam)
+{
+	return __rtw89_cam_init_addr_cam(rtwdev, addr_cam, bssid_cam, false);
 }
 
 static int rtw89_cam_get_avail_bssid_cam(struct rtw89_dev *rtwdev,
@@ -742,6 +778,7 @@ int rtw89_cam_init(struct rtw89_dev *rtwdev, struct rtw89_vif_link *rtwvif_link)
 {
 	struct rtw89_addr_cam_entry *addr_cam = &rtwvif_link->addr_cam;
 	struct rtw89_bssid_cam_entry *bssid_cam = &rtwvif_link->bssid_cam;
+	bool prefer_high = false;
 	int ret;
 
 	ret = rtw89_cam_init_bssid_cam(rtwdev, rtwvif_link, bssid_cam,
@@ -751,7 +788,19 @@ int rtw89_cam_init(struct rtw89_dev *rtwdev, struct rtw89_vif_link *rtwvif_link)
 		return ret;
 	}
 
-	ret = rtw89_cam_init_addr_cam(rtwdev, addr_cam, bssid_cam);
+#if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+	if (rtwdev->chip->chip_id == RTL8852B) {
+		const struct ieee80211_vif *vif = rtwvif_link_to_vif(rtwvif_link);
+
+		/* Place the auxiliary AWDL NO_LINK catch-all entry after
+		 * per-peer AD_HOC entries so hardware matches peer mac_id
+		 * first and can service hardware RX BlockAck per peer. */
+		if (vif && vif->p2p && vif->type == NL80211_IFTYPE_STATION)
+			prefer_high = true;
+	}
+#endif
+
+	ret = __rtw89_cam_init_addr_cam(rtwdev, addr_cam, bssid_cam, prefer_high);
 	if (ret) {
 		rtw89_err(rtwdev, "failed to init addr cam\n");
 		return ret;

@@ -21,6 +21,7 @@
 #include "owly_unicast_observe.h"
 void rtw89_compat_awdl_rx_note(const struct rtw89_rx_desc_info *d,const struct sk_buff *skb)
 {
+    static const uint8_t awdl_bssid[6] = {0, 0x25, 0, 0xff, 0x94, 0x73};
     static volatile unsigned long samples;
     if (!d || !skb) return;
     if (skb->len >= FCS_LEN)
@@ -29,10 +30,15 @@ void rtw89_compat_awdl_rx_note(const struct rtw89_rx_desc_info *d,const struct s
                             (unsigned)d->addr1_match << 2 | (unsigned)d->addr_cam_valid << 3 |
                             (unsigned)d->ampdu << 4,
                             0, d->data_rate, d->mac_id);
-    if(!owly_observe_unicast_frame(skb->data,skb->len))return;
+    /* Observe hardware-matched mac_id for unicast AWDL Data and Action frames
+     * (including initial ADDBA Request before the first Data frame). */
     if (d->long_rxdesc && d->addr_cam_valid && d->addr1_match &&
-        !d->crc32_err && !d->icv_err && !(skb->data[1] & 0x43u))
+        !d->crc32_err && !d->icv_err && skb->len >= 24u &&
+        (skb->data[0] == 0x08u || skb->data[0] == 0x88u || skb->data[0] == 0xd0u) &&
+        !(skb->data[1] & 0x43u) && !(skb->data[4] & 1u) &&
+        !memcmp(skb->data + 16, awdl_bssid, sizeof(awdl_bssid)))
         rtw89_awdl_note_rx_cam(skb->data + 10, skb->data + 4, d->mac_id);
+    if(!owly_observe_unicast_frame(skb->data,skb->len))return;
     const unsigned long count=__sync_add_and_fetch(&samples,1ul);
     if(count>8ul && (count&(count-1ul)))return;
     IOLog("OWLY unicast RX hardware: count=%lu crc=%u icv=%u cam_valid=%u cam=%u a1=%u macid=%u bytes=%u\n",

@@ -297,8 +297,8 @@ int main(int argc,char **argv){
  before=delivered;owly_peer_close_all();drain();assert(delivered==before && packet_alloc==packet_free && allocated==freed);
  /* Ready queue is bounded even when the ordinary RX worker is stalled. */
  reset();open_peer();receive(request(56,0));owly_peer_tick(&channel);
- rx_context=true;for(unsigned sn=100;sn<241;sn++)assert(owly_peer_data_rx(qos(sn,0)));rx_context=false;
- assert(owly_peer_ready_count==128);owly_peer_close_all();drain();assert(packet_alloc==packet_free && allocated==freed);
+ rx_context=true;for(unsigned sn=100;sn<100u+OWLY_PEER_READY_SIZE+13u;sn++)assert(owly_peer_data_rx(qos(sn,0)));rx_context=false;
+ assert(owly_peer_ready_count==OWLY_PEER_READY_SIZE);owly_peer_close_all();drain();assert(packet_alloc==packet_free && allocated==freed);
  late_control_reply();dynamic_fallback();action_rssi();
  puts("production peer glue: RSSI seeding and expiry, deferred RX, scan/window/H2C errors, duplicate retries, reorder/BAR and teardown passed (firmware mocked)");
 }

@@ -349,7 +349,9 @@ static void idle_discovery(bool sparse, uint8_t channel)
         assert(!send_next(&link,start_aw+1024,wire,sizeof(wire),&written));
         assert(send_next(&link,start_aw+4096,wire,sizeof(wire),&written)==1);
         assert(wire[90]==0x84 && owly_le16(wire+34)==1);
-        assert(!memcmp(wire+40,eth+14,sizeof(eth)-14) && !link.count && !link.queue_used[0] && !link.queue_used[1]);
+        uint64_t used_any = 0;
+        for (unsigned w = 0; w < OWLY_LINK_QUEUE_WORDS; ++w) used_any |= link.queue_used[w];
+        assert(!memcmp(wire+40,eth+14,sizeof(eth)-14) && !link.count && !used_any);
     }
 }
 

@@ -149,9 +149,9 @@ static void queue(void) {
     owly_link_tx_result(&link_state,offset,generation,0);CHECK(link_state.tx_handoffs==1 && !link_state.tx_radio_acked);
     CHECK(owly_link_next_tx(&link_state,1000300,true,wire,sizeof(wire),&out,&offset,&generation)==0 && out==0);
     for(unsigned i=0;i<OWLY_LINK_QUEUE;i++)CHECK(!owly_link_enqueue(&link_state,eth,n,1000400+i));
-    CHECK(owly_link_enqueue(&link_state,eth,n,1000600)==-ENOBUFS);
-    owly_link_reconcile(&link_state,false,NULL,0,1000700);CHECK(link_state.count==0 && link_state.tx_expired==OWLY_LINK_QUEUE);
-    CHECK(owly_link_enqueue(&link_state,eth,n,1000800)==-ENETDOWN);
+    CHECK(owly_link_enqueue(&link_state,eth,n,1000400+OWLY_LINK_QUEUE)==-ENOBUFS);
+    owly_link_reconcile(&link_state,false,NULL,0,1000400+OWLY_LINK_QUEUE+100);CHECK(link_state.count==0 && link_state.tx_expired==OWLY_LINK_QUEUE);
+    CHECK(owly_link_enqueue(&link_state,eth,n,1000400+OWLY_LINK_QUEUE+200)==-ENETDOWN);
     start();CHECK(!owly_link_enqueue(&link_state,eth,n,1000100));
     CHECK(owly_link_next_tx(&link_state,2100101,true,wire,sizeof(wire),&out,&offset,&generation)==0 && link_state.tx_expired==1);
     start();CHECK(!owly_link_enqueue(&link_state,eth,n,1000100));

@@ -47,8 +47,10 @@ static bool owly_peer_fault,owly_peer_accepting;
 static bool owly_peer_use_action_rssi = true;
 static bool owly_peer_turbo = true;
 static struct work_struct owly_peer_delivery_work;
-static struct {struct sk_buff *skb;uint64_t generation;} owly_peer_ready[128];
+#define OWLY_PEER_READY_SIZE 1024u
+static struct {struct sk_buff *skb;uint64_t generation;} owly_peer_ready[OWLY_PEER_READY_SIZE];
 static unsigned owly_peer_ready_head,owly_peer_ready_count;
+static uint64_t owly_peer_ready_drops;
 static void owly_peer_delivery_run(struct work_struct *work);
 static void owly_awdl_deliver_rx(struct sk_buff *skb);
 static struct ieee80211_channel *owly_sync_bound_channel(void);
@@ -58,7 +60,8 @@ static void owly_peer_init(void)
  spin_lock_init(&owly_peer_lock);memset(owly_radio_peers,0,sizeof(owly_radio_peers));
  owly_control_head=owly_control_count=0;owly_peer_generation=owly_peer_check_us=0;
  owly_peer_fault=owly_peer_accepting=false;owly_control_sequence=0;owly_tx_ba_dialog=0;
- owly_peer_ready_head=owly_peer_ready_count=0;INIT_WORK(&owly_peer_delivery_work,owly_peer_delivery_run);
+ owly_peer_ready_head=owly_peer_ready_count=0;owly_peer_ready_drops=0;
+ INIT_WORK(&owly_peer_delivery_work,owly_peer_delivery_run);
 }
 struct owly_peer_packet_queues {
  struct list_head drop;
@@ -72,11 +75,16 @@ static void owly_peer_good(void *ctx,void *packet)
 {
  struct owly_peer_packet_queues *queues=ctx;
  struct sk_buff *skb=packet;
- if(!glue.up || !glue.awdl_rx_wq || !owly_peer_accepting || owly_peer_ready_count==128){
+ if(!glue.up || !glue.awdl_rx_wq || !owly_peer_accepting || owly_peer_ready_count==OWLY_PEER_READY_SIZE){
+  if(owly_peer_ready_count==OWLY_PEER_READY_SIZE) {
+   const uint64_t drops = ++owly_peer_ready_drops;
+   if(drops<=4ull || !(drops&(drops-1ull)))
+    IOLog("OWLY peer RX ready drop: drops=%llu\n",(unsigned long long)drops);
+  }
   list_add_tail(&skb->list,&queues->drop);
   return;
  }
- const unsigned slot=(owly_peer_ready_head+owly_peer_ready_count)%128;
+ const unsigned slot=(owly_peer_ready_head+owly_peer_ready_count)%OWLY_PEER_READY_SIZE;
  owly_peer_ready[slot].skb=skb;
  owly_peer_ready[slot].generation=owly_peer_generation;
  ++owly_peer_ready_count;
@@ -106,22 +114,29 @@ static void owly_peer_delivery_run(struct work_struct *work)
 {
  (void)work;
  /* Ordinary RX work: Apple's input may call back into cmd/wiphy. */
+ struct {struct sk_buff *skb;bool deliver;} batch[32];
  for(;;){
-  struct sk_buff *skb=NULL;bool deliver=false;spin_lock(&owly_peer_lock);
-  if(owly_peer_ready_count){
-   const unsigned at=owly_peer_ready_head;skb=owly_peer_ready[at].skb;
-   deliver=glue.up && owly_peer_accepting && owly_peer_ready[at].generation==owly_peer_generation;
-   owly_peer_ready_head=(at+1u)%128;--owly_peer_ready_count;
+  unsigned n=0;
+  spin_lock(&owly_peer_lock);
+  while(n<32u && owly_peer_ready_count){
+   const unsigned at=owly_peer_ready_head;
+   batch[n].skb=owly_peer_ready[at].skb;
+   batch[n].deliver=glue.up && owly_peer_accepting && owly_peer_ready[at].generation==owly_peer_generation;
+   owly_peer_ready_head=(at+1u)%OWLY_PEER_READY_SIZE;--owly_peer_ready_count;
+   ++n;
   }
   spin_unlock(&owly_peer_lock);
-  if(!skb)break;
-  if(deliver)owly_awdl_deliver_rx(skb);else kfree_skb(skb);
+  if(!n)break;
+  for(unsigned i=0;i<n;++i){
+   if(batch[i].deliver)owly_awdl_deliver_rx(batch[i].skb);
+   else kfree_skb(batch[i].skb);
+  }
  }
 }
 static void owly_peer_clear_delivery(void)
 {
  struct owly_peer_packet_queues q;owly_peer_queues_init(&q);spin_lock(&owly_peer_lock);owly_peer_accepting=false;
- while(owly_peer_ready_count){owly_peer_bad(&q,owly_peer_ready[owly_peer_ready_head].skb);owly_peer_ready_head=(owly_peer_ready_head+1u)%128;--owly_peer_ready_count;}
+ while(owly_peer_ready_count){owly_peer_bad(&q,owly_peer_ready[owly_peer_ready_head].skb);owly_peer_ready_head=(owly_peer_ready_head+1u)%OWLY_PEER_READY_SIZE;--owly_peer_ready_count;}
  spin_unlock(&owly_peer_lock);owly_peer_queues_finish(&q);
 }
 static void owly_peer_drain_rx(void)

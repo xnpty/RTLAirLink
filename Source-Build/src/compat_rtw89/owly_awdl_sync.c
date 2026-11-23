@@ -441,9 +441,9 @@ int owly_sync_frame(struct owly_sync *s,uint64_t now,uint8_t *f,size_t cap,size_
     /* Advertise the bound radio's actual bandwidth on 5 GHz (20/40/80 MHz). */
     v[33]=15; v[34]=1; v[35]=0; v[36]=3; v[37]=v[38]=255;
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
-    const uint8_t bw = s->channel == 6 ? 20u : (s->channel_width ? s->channel_width : 20u);
+    const uint8_t bw = s->channel == 6 ? 20u : (s->channel_width ? s->channel_width : 80u);
 #else
-    const uint8_t bw = 20u;
+    const uint8_t bw = 80u;
 #endif
     const uint8_t legacy_flags = s->channel == 6 ? 0x2b : (bw >= 40u ? 0x1d : 0x18);
     const uint8_t legacy_ch = (s->channel != 6 && bw >= 40u) ? (uint8_t)(s->channel + 2u) : s->channel;

@@ -19,20 +19,19 @@ static const uint8_t snap[8]={0xaa,0xaa,3,0,0x17,0xf2,8,0};
 #define OWLY_LINK_PEER_AWAKE_US 100000u
 #define OWLY_LINK_IDLE_AW_US 4000u
 #define OWLY_LINK_IDLE_RETURN_GUARD_US 1024u
-_Static_assert(OWLY_LINK_QUEUE<=128u,"TX occupancy mask must cover the entire queue");
+_Static_assert(OWLY_LINK_QUEUE<=OWLY_LINK_QUEUE_WORDS*64u,"TX occupancy mask must cover the entire queue");
 static unsigned queue_alloc_slot(struct owly_native_link *s) {
-    if (~s->queue_used[0]) {
-        unsigned bit = (unsigned)__builtin_ctzll(~s->queue_used[0]);
-        s->queue_used[0] |= 1ull << bit;
-        return bit;
+    for (unsigned w = 0; w < OWLY_LINK_QUEUE_WORDS; ++w) {
+        if (~s->queue_used[w]) {
+            unsigned bit = (unsigned)__builtin_ctzll(~s->queue_used[w]);
+            s->queue_used[w] |= 1ull << bit;
+            return w * 64u + bit;
+        }
     }
-    unsigned bit = (unsigned)__builtin_ctzll(~s->queue_used[1]);
-    s->queue_used[1] |= 1ull << bit;
-    return 64u + bit;
+    return 0u;
 }
 static void queue_free_slot(struct owly_native_link *s, unsigned slot) {
-    if (slot < 64u) s->queue_used[0] &= ~(1ull << slot);
-    else s->queue_used[1] &= ~(1ull << (slot - 64u));
+    s->queue_used[slot / 64u] &= ~(1ull << (slot % 64u));
 }
 static bool mac_ok(const uint8_t *a) {return a && !(a[0]&1u) && (a[0]|a[1]|a[2]|a[3]|a[4]|a[5]);}
 static bool channel_ok(uint8_t c) {return c==6 || c==44 || c==149;}
@@ -50,7 +49,7 @@ static void expire(struct owly_native_link *s,uint64_t now) {
     unsigned i;
     if(now<s->last_now_us) {
         memset(s->peers,0,sizeof(s->peers));s->tx_expired+=s->count;s->head=s->count=0;
-        s->queue_used[0]=s->queue_used[1]=0;
+        memset(s->queue_used,0,sizeof(s->queue_used));
         s->last_unicast_activity_us=0;
         s->preferred_us=now;
         s->pause_started_us=s->tx_paused ? now : 0;
@@ -74,7 +73,7 @@ void owly_link_reconcile(struct owly_native_link *s,bool active,const uint8_t lo
     active=active && mac_ok(local) && channel_ok(ch);
     if(active!=s->active || (active && (s->channel!=ch || memcmp(s->local,local,6)))) {
         memset(s->peers,0,sizeof(s->peers));s->tx_expired+=s->count;s->head=s->count=0;
-        s->queue_used[0]=s->queue_used[1]=0;
+        memset(s->queue_used,0,sizeof(s->queue_used));
         s->last_unicast_activity_us=0;
         memset(s->preferred,0,6);s->preferred_us=0;++s->generation;
         s->tx_paused=false;s->pause_started_us=0;
@@ -659,7 +658,7 @@ int owly_link_enqueue(struct owly_native_link *s,const uint8_t *eth,size_t n,uin
     f->awaiting_first_mif=!s->sync_enabled;
     if(!(f->destination[0]&1u) && !find(s,f->destination)) {queue_free_slot(s,at);++s->tx_refused;return -EHOSTUNREACH;}
     f->length=(uint16_t)size;f->queued_us=now;f->pause_credit_us=0;f->generation=s->generation;
-    s->queue_order[(s->head+s->count)%OWLY_LINK_QUEUE]=(uint8_t)at;
+    s->queue_order[(s->head+s->count)%OWLY_LINK_QUEUE]=(uint16_t)at;
     ++s->count;++s->tx_enqueued;
     if(f->kind==OWLY_LINK_TX_UNICAST)s->last_unicast_activity_us=now;
     return 0;

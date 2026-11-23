@@ -6,6 +6,7 @@
 #include <string.h>
 
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 typedef uint32_t __le32;
@@ -24,10 +25,13 @@ typedef uint32_t __le32;
 #define RTW89_ROLE_INFO_CHANGE 3
 #define IEEE80211_CONF_MONITOR BIT(10)
 #define IEEE80211_FTYPE_DATA 0x08
+#define IEEE80211_STYPE_QOS_DATA 0x80
 #define IEEE80211_TX_INTFL_DONT_ENCRYPT BIT(16)
 #define IEEE80211_TX_CTL_REQ_TX_STATUS BIT(0)
+#define IEEE80211_TX_CTL_AMPDU BIT(1)
 #define IEEE80211_TX_CTL_NO_ACK BIT(2)
 #define IEEE80211_TX_CTL_INJECTED BIT(3)
+static inline bool test_bit(unsigned bit, const unsigned long *map) { return ((*map >> bit) & 1ul) != 0; }
 #define RTW89_CORE_TX_TYPE_DATA 1
 #define RTW89_RX_TYPE_DATA 2
 #define RTW89_CMAC_SEL 1
@@ -59,9 +63,10 @@ struct rtw89_dev {
     const struct chip_info *chip;
     bool dbcc_en, scanning;
 };
+struct rtw89_chan { unsigned band_width; };
 struct rtw89_bssid_cam_entry { bool valid; u8 bssid_cam_idx, bssid[ETH_ALEN]; };
 struct rtw89_vif_link {
-    u8 mac_addr[ETH_ALEN], bssid[ETH_ALEN], port;
+    u8 mac_addr[ETH_ALEN], bssid[ETH_ALEN], port, chanctx_idx;
     struct { bool valid; u8 addr_cam_idx; } addr_cam;
     struct rtw89_bssid_cam_entry bssid_cam;
 };
@@ -72,6 +77,20 @@ struct ieee80211_vif {
     int type;
     bool p2p;
     u8 addr[ETH_ALEN];
+};
+struct ieee80211_link_sta {
+    struct { u8 ampdu_factor, ampdu_density; } ht_cap;
+};
+struct ieee80211_sta { struct ieee80211_link_sta deflink; };
+struct rtw89_sta {
+    bool owly_awdl;
+    unsigned long ampdu_map[1];
+    struct { u16 agg_num; } ampdu_params[16];
+};
+struct rtw89_sta_link {
+    struct rtw89_sta *rtwsta;
+    bool ra_configured;
+    struct { unsigned macid, bw_cap; u64 ra_mask; } ra;
 };
 struct ops {
     void (*configure_filter)(struct ieee80211_hw *, unsigned, unsigned *, u64);
@@ -84,16 +103,22 @@ struct rtw89_rx_desc_info { unsigned frame_type; };
 struct ieee80211_tx_info { u32 flags; };
 struct rtw89_tx_desc_info {
     bool use_rate, stbc, ldpc, dis_data_fb, is_bmc;
+    bool agg_en, hw_rts_en, rts_en, tx_cnt_lmt_en;
     unsigned data_bw, gi_ltf, data_rate, port, mac_id, hw_seq_mode, hw_ssn_sel;
+    unsigned ampdu_num, ampdu_density, tx_cnt_lmt;
 };
 struct rtw89_core_tx_request {
     struct ieee80211_vif *vif;
     const struct rtw89_vif_link *rtwvif_link;
-    void *sta;
+    const struct rtw89_sta_link *rtwsta_link;
+    struct ieee80211_sta *sta;
     const struct sk_buff *skb;
     unsigned tx_type;
     struct rtw89_tx_desc_info desc_info;
 };
+static const struct rtw89_chan mock_chan = { 2u };
+static const struct rtw89_chan *rtw89_chan_get(struct rtw89_dev *p, u8 idx)
+{ (void)p; (void)idx; return &mock_chan; }
 
 static struct wiphy wiphy = {BIT(NL80211_IFTYPE_P2P_CLIENT)};
 static struct ieee80211_hw hw;
