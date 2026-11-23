@@ -1,6 +1,6 @@
 # RTLAirLink
 
-The first native AWDL/AirDrop implementation for Realtek RTL8852BE on macOS Tahoe.
+The first native AWDL/AirDrop implementation for Realtek on macOS Tahoe.
 
 **Native AWDL research, design and implementation by Anh Tài (xnpty) in Owly/RTLAirLink.** [Credits and source history](CREDITS.md)
 
