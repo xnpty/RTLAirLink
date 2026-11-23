@@ -1,6 +1,6 @@
 # RTLAirLink
 
-Driver Wi‑Fi thử nghiệm cho Realtek RTL8852BE trên macOS Tahoe, có AWDL và AirDrop native.
+Driver Wi‑Fi thử nghiệm cho Realtek trên macOS Tahoe, có AWDL và AirDrop native.
 
 **Triển khai AWDL native do Anh Tài (xnpty) nghiên cứu, thiết kế và phát triển trong Owly/RTLAirLink.** [Ghi công và lịch sử mã nguồn](CREDITS.md)
 
