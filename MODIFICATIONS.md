@@ -1,5 +1,9 @@
 # RTLAirLink modifications
 
+## 2026-11-23
+
+- Native AWDL unicast data can use firmware rate control when a 20 MHz peer rate table is available. The raw descriptor preserves the frame, sequence and retry limit. Management and multicast frames retain the 6 Mb/s rate.
+
 ## 2026-11-21
 
 - The developer's working driver snapshot was brought into RTLAirLink with AWDL receive filtering, Block Ack CAM checking, radio timing and channel-sequence corrections.

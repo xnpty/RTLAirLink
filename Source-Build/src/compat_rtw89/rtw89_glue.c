@@ -3424,8 +3424,8 @@ static int owly_sync_submit(struct ieee80211_channel *ch,const uint8_t *p,size_t
     const unsigned int ac=data ? IEEE80211_AC_BE : IEEE80211_AC_VO;
     info->hw_queue=owly_core04c_vif->hw_queue[ac];
     skb->priority=data ? 0 : 7; skb_set_queue_mapping(skb,ac);
-    /* The injected descriptor uses a fixed legacy 6 Mbps rate on the
-     * already-bound channel. The native queue needs the actual PCIe result. */
+    /* Keep 6 Mbps as the injected-frame default. The descriptor builder
+     * can use firmware rate control for data to a configured AWDL peer. */
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     int qsel;
     int rc=rtw89_core_tx_write(rtwdev,owly_core04c_vif,

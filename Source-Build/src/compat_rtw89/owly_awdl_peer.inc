@@ -171,8 +171,15 @@ static int owly_peer_open(struct owly_awdl_radio_peer *p,const uint8_t mac[6])
  /* Radio context readiness only. Never ieee80211_sta.tdls or an AP join. */
  sta_to_rtwsta(sta)->owly_awdl=true;sta->wme=true;sta->deflink.bandwidth=IEEE80211_STA_RX_BW_20;
  sta->deflink.rx_nss=1;sta->max_rx_aggregation_subframes=64;struct ieee80211_channel *ch=owly_sync_bound_channel();
- if(ch){struct ieee80211_supported_band *band=hw->wiphy->bands[ch->band];
-  for(unsigned i=0;band && i<band->n_bitrates && i<32;i++)if(band->bitrates[i].bitrate>=60)sta->deflink.supp_rates[ch->band]|=BIT(i);}
+ if(ch){
+  struct ieee80211_supported_band *band=hw->wiphy->bands[ch->band];
+  /* Use only the mandatory OFDM rates for the AWDL peer's rate table. */
+  for(unsigned i=0;band && i<band->n_bitrates && i<32;i++){
+   const unsigned bitrate=band->bitrates[i].bitrate;
+   if(bitrate==60 || bitrate==120 || bitrate==240)
+    sta->deflink.supp_rates[ch->band]|=BIT(i);
+  }
+ }
  spin_lock(&owly_peer_lock);memcpy(p->mac,mac,6);memcpy(p->own,owly_core04c_vif->addr,6);
  p->state=IEEE80211_STA_NOTEXIST;p->sta=sta;spin_unlock(&owly_peer_lock);
  while(p->state<IEEE80211_STA_ASSOC){

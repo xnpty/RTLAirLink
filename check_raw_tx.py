@@ -39,6 +39,9 @@ def run(source, output, cc=None):
         'rtw89_build_txwd_info0', 'rtw89_build_txwd_info1',
         'rtw89_build_txwd_info4', 'rtw89_build_txwd_body0',
         'rtw89_build_txwd_body2', 'rtw89_build_txwd_body3')]
+    awdl_port = 'static void rtw89_core_tx_update_awdl_port(' in core
+    if awdl_port:
+        functions.insert(1, extract_function(core, 'rtw89_core_tx_update_awdl_port'))
     submit = extract_function(glue, 'owly_sync_submit')
     if 'owly_awdl_away(' in submit:
         submit = extract_function(glue, 'owly_awdl_away') + '\n\n' + submit
@@ -61,6 +64,7 @@ def run(source, output, cc=None):
             executable = temp / mode
             commands = [('compile', [compiler, *sdk, *flags, '-UNDEBUG', '-std=gnu11',
                 '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+                f'-DTEST_AWDL_PORT={int(awdl_port)}',
                 '-DOWLY_NATIVE_PEER_DATA=1', '-I' + str(temp),
                 str(ROOT / 'tests/raw_tx_model.c'), '-o', str(executable)]),
                 ('run', [str(executable)])]

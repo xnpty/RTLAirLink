@@ -1324,7 +1324,8 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	}
 
 	if (rtwdev->chip->chip_id != RTL8852B || !tx_req->vif || !tx_req->vif->p2p ||
-	    tx_req->sta || tx_req->tx_type != RTW89_CORE_TX_TYPE_DATA ||
+	    tx_req->tx_type != RTW89_CORE_TX_TYPE_DATA ||
+	    !(info->flags & IEEE80211_TX_CTL_INJECTED) ||
 	    !(info->flags & IEEE80211_TX_INTFL_DONT_ENCRYPT) ||
 	    !(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS) ||
 	    (info->flags & IEEE80211_TX_CTL_NO_ACK) || desc_info->is_bmc ||
@@ -1334,9 +1335,21 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    memcmp(frame + 24, awdl_snap, sizeof(awdl_snap)))
 		return;
 
-	/* AWDL sends data without an associated station. Keep the TXWD port
-	 * consistent with the MAC ID already taken from the auxiliary link. */
-	desc_info->port = link->port;
+	if (!tx_req->sta) {
+		/* Keep the fallback port consistent with the VIF's MAC ID. */
+		desc_info->port = link->port;
+		return;
+	}
+
+	const struct rtw89_sta_link *peer = tx_req->rtwsta_link;
+	if (peer && peer->rtwsta->owly_awdl && peer->ra_configured &&
+	    peer->ra.macid == desc_info->mac_id && peer->ra.ra_mask &&
+	    peer->ra.bw_cap == RTW89_CHANNEL_WIDTH_20) {
+		/* Let firmware choose the data rate using the AWDL peer's
+		 * 20 MHz OFDM rate table. Keep the raw frame and its sequence. */
+		desc_info->use_rate = false;
+		desc_info->dis_data_fb = false;
+	}
 }
 #endif
 
@@ -1756,7 +1769,7 @@ static void owly_native_txwd_note(struct rtw89_dev *rtwdev,
 		hash = (hash ^ frame[i]) * 16777619u;
 	IOLog("OWLY raw TXWD: count=%lu seq=%u ac=%u priority=%u macid=%u port=%u "
 	      "rate=%u attempts=%u noack=%u bytes=%u hash=%08x "
-	      "body0=%08x body2=%08x body3=%08x info0=%08x info1=%08x info4=%08x "
+	      "body0=%08x body2=%08x body3=%08x info0=%08x info1=%08x info4=%08x use_rate=%u "
 	      "(descriptor only, not peer receipt)\n",
 	      count, desc.seq, skb_get_queue_mapping(skb), skb->priority,
 	      desc.mac_id, desc.port, desc.data_rate, desc.tx_cnt_lmt,
@@ -1766,7 +1779,8 @@ static void owly_native_txwd_note(struct rtw89_dev *rtwdev,
 	      (unsigned)le32_to_cpu(rtw89_build_txwd_body3(&desc)),
 	      (unsigned)le32_to_cpu(rtw89_build_txwd_info0(&desc)),
 	      (unsigned)le32_to_cpu(rtw89_build_txwd_info1(&desc)),
-	      (unsigned)le32_to_cpu(rtw89_build_txwd_info4(&desc)));
+	      (unsigned)le32_to_cpu(rtw89_build_txwd_info4(&desc)),
+	      (unsigned)desc.use_rate);
 }
 #endif
 

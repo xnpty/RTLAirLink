@@ -532,7 +532,7 @@ void rtw89_phy_ra_update_sta_link(struct rtw89_dev *rtwdev,
 		    ra->en_sgi,
 		    ra->giltf);
 
-	rtw89_fw_h2c_ra(rtwdev, ra, false);
+	rtwsta_link->ra_configured = !rtw89_fw_h2c_ra(rtwdev, ra, false);
 }
 
 void rtw89_phy_ra_update_sta(struct rtw89_dev *rtwdev, struct ieee80211_sta *sta,
@@ -772,7 +772,7 @@ void rtw89_phy_ra_assoc(struct rtw89_dev *rtwdev, struct rtw89_sta_link *rtwsta_
 		    ra->en_sgi,
 		    ra->giltf);
 
-	rtw89_fw_h2c_ra(rtwdev, ra, csi);
+	rtwsta_link->ra_configured = !rtw89_fw_h2c_ra(rtwdev, ra, csi);
 }
 
 void rtw89_phy_ra_recalc_agg_limit(struct rtw89_dev *rtwdev)

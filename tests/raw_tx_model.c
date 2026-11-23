@@ -33,10 +33,14 @@ enum mac80211_rate_control_flags { TEST_RATE_FLAGS_DUMMY=0 };
 #define RTW89_HW_RATE_CCK1 0
 #define RTW89_HW_RATE_OFDM6 4
 #define RTW89_CHIP_BE 1
+#define RTL8852B 2
+#define ETH_ALEN 6
+#define IEEE80211_FTYPE_DATA 8
+#define RTW89_CHANNEL_WIDTH_20 0
 #define OWLY_SYNC_FRAME_MAX 2048
 enum rtw89_core_tx_type { RTW89_CORE_TX_TYPE_MGMT, RTW89_CORE_TX_TYPE_DATA, RTW89_CORE_TX_TYPE_FWCMD };
 enum btc_pkt_type { PACKET_MAX };
-struct ieee80211_vif { unsigned hw_queue[4]; };
+struct ieee80211_vif { unsigned hw_queue[4]; bool p2p; };
 struct ieee80211_sta { bool mlo; };
 struct ieee80211_hdr { __le16 frame_control, duration; u8 addr1[6],addr2[6],addr3[6]; __le16 seq_ctrl; };
 struct ieee80211_tx_info {
@@ -46,12 +50,24 @@ struct ieee80211_tx_info {
 struct sk_buff { u8 bytes[4096],*data; size_t len; unsigned priority,mapping; struct ieee80211_tx_info info; };
 #define IEEE80211_SKB_CB(skb) (&(skb)->info)
 struct rtw89_addr_cam_entry { bool valid; };
-struct rtw89_vif_link { struct rtw89_addr_cam_entry addr_cam; unsigned chanctx_idx; };
+struct rtw89_vif_link {
+ struct rtw89_addr_cam_entry addr_cam;
+ unsigned chanctx_idx, port;
+ u8 mac_addr[ETH_ALEN];
+};
+struct rtw89_sta { bool owly_awdl; };
+struct rtw89_sta_link {
+ struct rtw89_sta *rtwsta;
+ unsigned mac_id;
+ bool ra_configured;
+ struct { unsigned macid, bw_cap; uint64_t ra_mask; } ra;
+};
 struct rtw89_vif { struct { void *next,*prev; } dlink_pool; };
 struct rtw89_chan { unsigned band_type; };
 struct rtw89_hw_rate_def { unsigned ht,vht[4]; };
 static const struct rtw89_hw_rate_def rtw89_hw_rate[2] = {{128,{256,266,276,286}},{128,{256,268,280,292}}};
-struct rtw89_dev { const struct { unsigned chip_gen; } *chip; struct rtw89_chan channel; };
+struct test_chip { unsigned chip_gen, chip_id; };
+struct rtw89_dev { const struct test_chip *chip; struct rtw89_chan channel; };
 struct ieee80211_channel { unsigned band,hw_value; };
 struct ieee80211_supported_band { unsigned n_bitrates; struct { unsigned bitrate; } bitrates[12]; };
 struct wiphy { struct ieee80211_supported_band *bands[2]; };
@@ -64,7 +80,7 @@ struct rtw89_tx_desc_info {
 };
 struct rtw89_core_tx_request {
  struct sk_buff *skb; struct ieee80211_vif *vif; struct ieee80211_sta *sta;
- struct rtw89_vif_link *rtwvif_link; void *rtwsta_link;
+ struct rtw89_vif_link *rtwvif_link; struct rtw89_sta_link *rtwsta_link;
  struct rtw89_tx_desc_info desc_info; enum rtw89_core_tx_type tx_type; bool with_wait;
 };
 static struct ieee80211_supported_band band;
@@ -75,6 +91,9 @@ static struct ieee80211_vif vif;
 static struct ieee80211_sta peer;
 static struct rtw89_vif rvif;
 static struct rtw89_vif_link link;
+static struct rtw89_sta rate_peer;
+static struct rtw89_sta_link rate_link = {.rtwsta = &rate_peer, .mac_id = 7};
+static bool peer_present = true;
 static struct ieee80211_vif *owly_core04c_vif=&vif;
 static struct { bool scanning; } glue;
 static unsigned checks,failures,hooks,submissions,kicks,frees;
@@ -92,7 +111,7 @@ static u8 *skb_put(struct sk_buff *s,unsigned n) { u8 *p=s->data+s->len;s->len+=
 static void skb_set_queue_mapping(struct sk_buff *s,unsigned q) { s->mapping=q; }
 static void kfree_skb(struct sk_buff *s) { ++frees;free(s); }
 static void ieee80211_free_txskb(struct ieee80211_hw *h,struct sk_buff *s) { (void)h;kfree_skb(s); }
-static struct ieee80211_sta *owly_peer_tx_station(const u8 *mac) { (void)mac;return &peer; }
+static struct ieee80211_sta *owly_peer_tx_station(const u8 *mac) { (void)mac;return peer_present ? &peer : NULL; }
 static const struct rtw89_chan *rtw89_chan_get(struct rtw89_dev *d,unsigned idx) { (void)idx;return &d->channel; }
 static inline bool ieee80211_is_ctl(__le16 fc) { return (fc&12)==4; }
 static bool ieee80211_vif_is_mld(struct ieee80211_vif *v) { (void)v;return false; }
@@ -103,19 +122,29 @@ static enum rtw89_core_tx_type rtw89_core_get_tx_type(struct rtw89_dev *d,struct
 static void rtw89_core_tx_update_h2c_info(struct rtw89_dev *d,struct rtw89_core_tx_request *r) { (void)d;(void)r; }
 static void rtw89_tx_rpt_init(struct rtw89_dev *d,struct rtw89_core_tx_request *r) { (void)d;r->desc_info.report=true;r->desc_info.tx_cnt_lmt_en=true;r->desc_info.tx_cnt_lmt=8; }
 static void rtw89_core_tx_update_mgmt_info(struct rtw89_dev *d,struct rtw89_core_tx_request *r) { (void)d;r->desc_info.hw_ssn_sel=1;r->desc_info.hw_seq_mode=1;r->desc_info.en_wd_info=true; }
-static void rtw89_core_tx_update_data_info(struct rtw89_dev *d,struct rtw89_core_tx_request *r) { (void)d;r->desc_info.en_wd_info=true;r->desc_info.data_retry_lowest_rate=4; }
+static void rtw89_core_tx_update_data_info(struct rtw89_dev *d,struct rtw89_core_tx_request *r) {
+ (void)d;
+ r->desc_info.en_wd_info=true;
+ r->desc_info.data_retry_lowest_rate=RTW89_HW_RATE_OFDM6;
+ r->desc_info.mac_id=r->rtwsta_link ? r->rtwsta_link->mac_id : 0;
+}
 static enum btc_pkt_type rtw89_core_tx_btc_spec_pkt_notify(struct rtw89_dev *d,struct rtw89_core_tx_request *r) { (void)d;(void)r;++hooks;return PACKET_MAX; }
 static void rtw89_core_tx_update_he_qos_htc(struct rtw89_dev *d,struct rtw89_core_tx_request *r,enum btc_pkt_type p) { (void)d;(void)p;++hooks;if(r->skb->data[0]==0x88)r->skb->data[1]|=0x80; }
 static void rtw89_core_tx_update_ampdu_info(struct rtw89_dev *d,struct rtw89_core_tx_request *r,enum btc_pkt_type p) { (void)d;(void)p;++hooks;r->desc_info.agg_en=true; }
 static void rtw89_core_tx_update_llc_hdr(struct rtw89_dev *d,struct rtw89_tx_desc_info *desc,struct sk_buff *s) { (void)d;desc->hdr_llc_len=s->data[0]==0x88?13:12; }
 
+#if TEST_AWDL_PORT
+#define RTW89_MACOS 1
+#endif
 #include "production_raw_tx.inc"
+#undef RTW89_MACOS
 
 static int rtw89_core_tx_write(struct rtw89_dev *d,struct ieee80211_vif *v,struct ieee80211_sta *s,struct sk_buff *skb,int *qsel)
 {
  ++submissions;last_priority=skb->priority;last_mapping=skb->mapping;last_hw_queue=skb->info.hw_queue;
  if(submit_result)return submit_result;
- struct rtw89_core_tx_request r={.skb=skb,.vif=v,.sta=s,.rtwvif_link=&link};
+ struct rtw89_core_tx_request r={.skb=skb,.vif=v,.sta=s,.rtwvif_link=&link,
+                                .rtwsta_link=s ? &rate_link : NULL};
  rtw89_core_tx_update_desc_info(d,&r);last_desc=r.desc_info;
  memcpy(sent,skb->data,skb->len);sent_len=skb->len;*qsel=(int)skb->mapping;kfree_skb(skb);return 0;
 }
@@ -133,9 +162,67 @@ static struct rtw89_tx_desc_info describe(struct sk_buff *s)
  s->data=s->bytes;struct rtw89_core_tx_request r={.skb=s,.vif=&vif,.sta=&peer,.rtwvif_link=&link};
  hooks=0;rtw89_core_tx_update_desc_info(&dev,&r);return r.desc_info;
 }
+
+#if TEST_AWDL_PORT
+static void test_awdl_rate_policy(struct ieee80211_channel *ch)
+{
+ const u32 flags=IEEE80211_TX_CTL_INJECTED|IEEE80211_TX_INTFL_DONT_ENCRYPT;
+ struct sk_buff s=frame(IEEE80211_FTYPE_DATA,flags);
+ const u8 snap[]={0xaa,0xaa,3,0,0x17,0xf2,8,0};
+ memcpy(s.bytes+24,snap,sizeof(snap));
+ vif.p2p=true;
+ memcpy(link.mac_addr,s.bytes+10,ETH_ALEN);
+ link.port=3;
+ rate_peer.owly_awdl=true;
+ rate_link.ra_configured=true;
+ rate_link.ra.macid=rate_link.mac_id;
+ rate_link.ra.bw_cap=RTW89_CHANNEL_WIDTH_20;
+ rate_link.ra.ra_mask=BIT(RTW89_HW_RATE_OFDM6);
+ hooks=0;
+
+ CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
+ const u32 word=rtw89_build_txwd_info0(&last_desc);
+ CHECK(!FIELD_GET(RTW89_TXWD_INFO0_USE_RATE,word));
+ CHECK(!FIELD_GET(RTW89_TXWD_INFO0_DISDATAFB,word));
+ CHECK(last_desc.data_retry_lowest_rate==RTW89_HW_RATE_OFDM6);
+ CHECK(hooks==0 && !last_desc.agg_en && last_desc.mac_id==rate_link.mac_id);
+ CHECK(!last_desc.hw_seq_mode && !last_desc.hw_ssn_sel);
+ CHECK(sent_len==s.len && !memcmp(sent,s.bytes,s.len));
+
+ rate_link.ra_configured=false;
+ CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb);
+ rate_link.ra_configured=true;
+ rate_link.ra.macid++;
+ CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb);
+ rate_link.ra.macid=rate_link.mac_id;
+ rate_link.ra.bw_cap=1;
+ CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb);
+ rate_link.ra.bw_cap=RTW89_CHANNEL_WIDTH_20;
+ rate_peer.owly_awdl=false;
+ CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb);
+ rate_peer.owly_awdl=true;
+
+ peer_present=false;
+ CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_desc.port==link.port);
+ peer_present=true;
+ s.bytes[4]|=1;
+ CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_desc.no_ack);
+ s.bytes[4]&=~1u;
+ s.bytes[0]=0xd0;
+ CHECK(owly_sync_submit(ch,s.bytes,s.len,false)==0);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_mapping==IEEE80211_AC_VO);
+}
+#endif
+
 int main(void)
 {
- static const struct { unsigned chip_gen; } chip={0};dev.chip=(const void *)&chip;
+ static const struct test_chip chip={.chip_id=RTL8852B};dev.chip=&chip;
  hw.wiphy=&wiphy;hw.priv=&dev;hw.extra_tx_headroom=128;wiphy.bands[0]=&band;
  band.n_bitrates=12;band.bitrates[4].bitrate=60;rvif.dlink_pool.next=rvif.dlink_pool.prev=&rvif;
  vif.hw_queue[IEEE80211_AC_BE]=42;vif.hw_queue[IEEE80211_AC_VO]=40;
@@ -185,6 +272,10 @@ int main(void)
  CHECK(before==submissions && kick_before==kicks);
  submit_result=-ENOSPC;const unsigned free_before=frees;CHECK(owly_sync_submit(&ch,original,108,true)==-ENOSPC);
  CHECK(frees==free_before+1 && kicks==kick_before);
+#if TEST_AWDL_PORT
+ submit_result=0;
+ test_awdl_rate_policy(&ch);
+#endif
  printf("raw TX production: %u checks, %u failures; radio I/O mocked, no transfer proof\n",checks,failures);
  return failures?1:0;
 }
