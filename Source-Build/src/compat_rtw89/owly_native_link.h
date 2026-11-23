@@ -21,6 +21,7 @@ struct owly_link_peer {
      * The exported owly_link_window below deliberately stays ABI7/20 bytes. */
     uint8_t election[24];
     int8_t rssi;
+    uint8_t ht_rx_mcs;
     uint16_t next_seq, consistent;
     uint8_t outliers;  /* samples ignored in a row while the clock held */
     uint64_t last_rx_us, clock_rx_us, anchor_us, last_mif_rx_us, last_data_rx_us;

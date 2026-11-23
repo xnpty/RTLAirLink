@@ -24,6 +24,8 @@ struct owly_action_info {
     unsigned char has_sync;
     unsigned char has_chanseq;
     unsigned char has_version;
+    unsigned char has_ht_rx_mcs;
+    unsigned char ht_rx_mcs;
     unsigned char complete;     /* presence of key TLVs, NOT valid peer */
     unsigned char next_aw_channel;
     unsigned char master_channel;
@@ -66,7 +68,7 @@ owly_decode_action(const unsigned char *f, size_t len,
     struct owly_action_info d = {0};
     unsigned short fc;
     size_t pos;
-    unsigned int processed = 0;
+    unsigned int processed = 0, ht_elements = 0;
 
     if (!out) return OWLY_ACTION_MALFORMED;
     *out = d;
@@ -115,6 +117,13 @@ owly_decode_action(const unsigned char *f, size_t len,
             d.master_channel = v[3];
             d.aw_period_tu = owly_le16(v + 5);
             d.next_aw_seq = owly_le16(v + 29);
+            break;
+        case 7: /* HT capabilities, one to four RX MCS octets. */
+            ++ht_elements;
+            /* Two prefix bytes, HT Capabilities, A-MPDU parameters, then
+             * the RX MCS mask and two trailing bytes. Only use stream 1. */
+            d.has_ht_rx_mcs = ht_elements == 1u && value_len >= 8u && value_len <= 11u;
+            d.ht_rx_mcs = d.has_ht_rx_mcs ? v[5] : 0;
             break;
         case 18: /* Channel Sequence, 16 slots */
             if (d.has_chanseq || value_len < 6u || v[0] != 15u ||

@@ -209,6 +209,7 @@ bool owly_link_observe(struct owly_native_link *s,const uint8_t *raw,size_t n,ui
     sample_peer_clock(s,p,&d,master,aw_countdown(&d,remaining,presence),now);
     p->last_rx_us=now;
     p->rssi=rssi;p->channel=ch;
+    if(d.has_ht_rx_mcs)p->ht_rx_mcs=d.ht_rx_mcs;
     /* iOS sends MIFs with this field zero while keeping the same master.
      * A frame heard on the AP channel does not locate the master's channel. */
     if(channel_ok(d.master_channel))p->master_channel=d.master_channel;

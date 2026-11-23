@@ -276,10 +276,42 @@ static void control_reply_slot(void)
     link_state.active=false;
     CHECK(!owly_link_unicast_reply_tx_ready(&link_state,remote,2006000));
 }
+static void ht_receive_rates(void)
+{
+    static const uint8_t ht[]={7,8,0,0,0,0x0c,0,0,0xf1,0,0};
+    const uint64_t now=2000000;
+    start();
+    size_t n=action(1000000,NULL);
+    CHECK(owly_link_observe(&link_state,raw,n,149,-42,now));
+    struct owly_link_peer *peer=&link_state.peers[0];
+    CHECK(peer->used && !peer->ht_rx_mcs);
+
+    memcpy(raw+n,ht,sizeof(ht));
+    CHECK(!owly_link_observe(&link_state,raw,n+sizeof(ht)-1,149,-42,now+1));
+    CHECK(!peer->ht_rx_mcs);
+    CHECK(owly_link_observe(&link_state,raw,n+sizeof(ht),149,-42,now+2));
+    CHECK(peer->ht_rx_mcs==0xf1);
+
+    /* A PSF without the optional element leaves the known mask intact. */
+    CHECK(owly_link_observe(&link_state,raw,n,149,-42,now+3));
+    CHECK(peer->ht_rx_mcs==0xf1);
+    memcpy(raw+n+sizeof(ht),ht,sizeof(ht));
+    raw[n+sizeof(ht)+8]=0;
+    CHECK(owly_link_observe(&link_state,raw,n+2*sizeof(ht),149,-42,now+4));
+    CHECK(peer->ht_rx_mcs==0xf1);
+    raw[n+1]=7;
+    CHECK(owly_link_observe(&link_state,raw,n+sizeof(ht)-1,149,-42,now+5));
+    CHECK(peer->ht_rx_mcs==0xf1);
+    memcpy(raw+n,ht,sizeof(ht));
+    raw[n+8]=0;
+    CHECK(owly_link_observe(&link_state,raw,n+sizeof(ht),149,-42,now+6));
+    CHECK(!peer->ht_rx_mcs);
+}
+
 int main(int argc,char **argv)
 {
     if (argc==2 && !strcmp(argv[1],"header")) observed_header00();
-    else {codec();qos_length_envelope();peers();queue();scan_activity_lifetime();control_reply_slot();malformed();native_controls();observed_header00();}
+    else {ht_receive_rates();codec();qos_length_envelope();peers();queue();scan_activity_lifetime();control_reply_slot();malformed();native_controls();observed_header00();}
     printf("native link production: %u checks passed; no RF proof\n",checks);
     return 0;
 }

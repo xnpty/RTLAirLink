@@ -438,6 +438,11 @@ static void rtw89_phy_ra_sta_update(struct rtw89_dev *rtwdev,
 		ra_mask &= rtw89_phy_ra_mask_rssi(rtwdev, rssi, 0);
 
 	ra_mask = rtw89_phy_ra_mask_recover(ra_mask, ra_mask_bak);
+#if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+	/* Keep the peer's legacy OFDM rates available for AWDL fallback. */
+	if (rtwsta_link->rtwsta->owly_awdl && (mode & RTW89_RA_MODE_HT))
+		ra_mask |= ra_mask_bak & RA_MASK_OFDM_RATES;
+#endif
 	ra_mask &= rtw89_phy_ra_mask_cfg(rtwdev, rtwsta_link, link_sta, chan);
 
 	switch (link_sta->bandwidth) {
