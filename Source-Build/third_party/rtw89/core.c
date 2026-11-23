@@ -1369,7 +1369,7 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 			desc_info->hw_rts_en = true;
 			desc_info->rts_en = true;
 			desc_info->tx_cnt_lmt_en = true;
-			desc_info->tx_cnt_lmt = 6;
+			desc_info->tx_cnt_lmt = 12;
 		}
 	}
 }

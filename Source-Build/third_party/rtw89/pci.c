@@ -737,8 +737,10 @@ static int rtw89_pci_poll_rpq_dma(struct rtw89_dev *rtwdev,
 out_unlock:
 	spin_unlock_bh(&rtwpci->trx_lock);
 
-	/* always release all RPQ */
-	work_done = min_t(int, cnt, budget);
+	/* always release all RPQ, but leave at least half of the NAPI budget
+	 * for RXQ so heavy TX completion bursts never starve incoming RX.
+	 */
+	work_done = min_t(int, cnt, max(1, budget / 2));
 	rtwdev->napi_budget_countdown -= work_done;
 
 	return work_done;

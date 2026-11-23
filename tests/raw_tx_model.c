@@ -221,7 +221,7 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  CHECK(doorbell==IEEE80211_AC_BE);
  CHECK(!last_desc.use_rate && !last_desc.dis_data_fb);
  CHECK(last_desc.agg_en && last_desc.ampdu_num==63 && last_desc.ampdu_density==5);
- CHECK(last_desc.hw_rts_en && last_desc.rts_en && last_desc.tx_cnt_lmt==6);
+ CHECK(last_desc.hw_rts_en && last_desc.rts_en && last_desc.tx_cnt_lmt==12);
  CHECK(!last_desc.hw_seq_mode && !last_desc.hw_ssn_sel && last_desc.seq==0x123);
  dev.channel.band_width=RTW89_CHANNEL_WIDTH_20;
  rate_link.ra.bw_cap=RTW89_CHANNEL_WIDTH_20;

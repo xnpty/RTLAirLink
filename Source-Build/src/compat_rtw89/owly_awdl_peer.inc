@@ -33,7 +33,7 @@ struct owly_awdl_radio_peer {
  uint8_t tx_ba_state, tx_ba_token, tx_ba_attempts;
  uint16_t tx_ba_buf_size, tx_qos_sn;
  bool tx_ba_needed;
- uint64_t tx_ba_sent_us;
+ uint64_t tx_ba_sent_us, tx_last_unicast_us;
 };
 struct owly_awdl_control {uint8_t bytes[64];size_t length;uint64_t received,generation;};
 static struct owly_awdl_radio_peer owly_radio_peers[4];
@@ -182,26 +182,6 @@ static uint8_t owly_peer_bound_width(void)
   return 40u;
  return 20u;
 }
-static void owly_peer_note_unicast_tx(const uint8_t destination[6])
-{
- struct owly_awdl_radio_peer *p = owly_peer_find(destination);
- if (p && !p->blocked && p->state >= IEEE80211_STA_ASSOC)
-  p->tx_ba_needed = true;
-}
-static bool owly_peer_tx_ampdu_peek(const uint8_t destination[6], uint16_t *qos_sn)
-{
- struct owly_awdl_radio_peer *p = owly_peer_find(destination);
- if (!owly_peer_turbo || !p || p->blocked || p->state < IEEE80211_STA_ASSOC ||
-     p->tx_ba_state != OWLY_TX_BA_OPERATIONAL)
-  return false;
- if (qos_sn) *qos_sn = p->tx_qos_sn;
- return true;
-}
-static void owly_peer_tx_ampdu_commit(const uint8_t destination[6])
-{
- struct owly_awdl_radio_peer *p = owly_peer_find(destination);
- if (p) p->tx_qos_sn = (uint16_t)((p->tx_qos_sn + 1u) & 4095u);
-}
 static void owly_peer_tx_ba_stop(struct owly_awdl_radio_peer *p, bool destroy)
 {
  struct ieee80211_hw *hw = glue_hw();
@@ -216,6 +196,34 @@ static void owly_peer_tx_ba_stop(struct owly_awdl_radio_peer *p, bool destroy)
  }
  p->tx_ba_state = OWLY_TX_BA_NONE;
  p->tx_ba_buf_size = 0;
+}
+static void owly_peer_note_unicast_tx(const uint8_t destination[6])
+{
+ struct owly_awdl_radio_peer *p = owly_peer_find(destination);
+ if (!p || p->blocked || p->state < IEEE80211_STA_ASSOC)
+  return;
+ const uint64_t now = glue_now_us();
+ if (p->tx_ba_state == OWLY_TX_BA_OPERATIONAL && p->tx_last_unicast_us &&
+     now > p->tx_last_unicast_us && now - p->tx_last_unicast_us > 2000000ull) {
+  owly_peer_tx_ba_stop(p, false);
+  p->tx_ba_attempts = 0;
+ }
+ p->tx_last_unicast_us = now;
+ p->tx_ba_needed = true;
+}
+static bool owly_peer_tx_ampdu_peek(const uint8_t destination[6], uint16_t *qos_sn)
+{
+ struct owly_awdl_radio_peer *p = owly_peer_find(destination);
+ if (!owly_peer_turbo || !p || p->blocked || p->state < IEEE80211_STA_ASSOC ||
+     p->tx_ba_state != OWLY_TX_BA_OPERATIONAL)
+  return false;
+ if (qos_sn) *qos_sn = p->tx_qos_sn;
+ return true;
+}
+static void owly_peer_tx_ampdu_commit(const uint8_t destination[6])
+{
+ struct owly_awdl_radio_peer *p = owly_peer_find(destination);
+ if (p) p->tx_qos_sn = (uint16_t)((p->tx_qos_sn + 1u) & 4095u);
 }
 static int owly_peer_ba_firmware(struct owly_awdl_radio_peer *p,unsigned tid,bool start,uint16_t ssn,uint16_t window)
 {
@@ -657,6 +665,12 @@ static void owly_peer_tick(struct ieee80211_channel *ch)
        p->ba_map |= tid_bit;
        spin_unlock(&owly_peer_lock);
        status = 0;
+       if (tid == 0u && p->tx_ba_state == OWLY_TX_BA_OPERATIONAL &&
+           p->tx_ba_sent_us && check_us > p->tx_ba_sent_us &&
+           check_us - p->tx_ba_sent_us > 1000000ull) {
+        owly_peer_tx_ba_stop(p, false);
+        p->tx_ba_attempts = 0;
+       }
       }
      }
     }

@@ -339,6 +339,13 @@ uint8_t owly_link_data_channel(struct owly_native_link *s,uint64_t now)
            now-p->last_data_rx_us>5000000u)continue;
         if(!best || p->last_data_rx_us>best->last_data_rx_us)best=p;
     }
+    if(!best && owly_link_data_busy(s,now)) {
+        for(unsigned i=0;i<OWLY_LINK_PEERS;i++) {
+            const struct owly_link_peer *p=&s->peers[i];
+            if(!fresh(p,now))continue;
+            if(!best || p->last_rx_us>best->last_rx_us)best=p;
+        }
+    }
     if(!best)return 0;
     unsigned most=0;uint8_t want=0;
     for(unsigned k=0;k<3u;k++) {

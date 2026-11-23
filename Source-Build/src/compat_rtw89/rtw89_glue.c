@@ -3294,7 +3294,7 @@ static void owly_mc_work_run(struct wiphy *wiphy, struct wiphy_work *work)
     uint8_t want_ch = owly_mc.channel;
     if (follow && follow != owly_mc.channel)
         want_ch = follow;
-    else if (!heard && owly_mc.channel != 6 && now - owly_mc.root_us > 10000000u)
+    else if (!heard && !busy && owly_mc.channel != 6 && now - owly_mc.root_us > 10000000u)
         want_ch = 6;
     if (want_ch != owly_mc.channel && owly_mc_channel_ok(want_ch) &&
         (!owly_mc.moved_us || now - owly_mc.moved_us >= 5000000u)) {
@@ -3529,7 +3529,7 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
     /* Drain a full burst of ready frames in one pass and ring one PCI
      * doorbell so RTL8852BE hardware can pack consecutive QoS MPDUs into
      * a single A-MPDU TXOP. */
-    const unsigned int budget = owly_peer_turbo ? 64u : 4u;
+    const unsigned int budget = owly_peer_turbo ? 32u : 4u;
     unsigned int sent = 0;
     int doorbell = -1;
     for(unsigned int i=0;i<budget && owly_sync_state.active;i++) {
@@ -3644,15 +3644,17 @@ int rtw89_glue_native_output(const uint8_t *eth,size_t n)
     struct ieee80211_channel *ch;int rc;
     if(!glue.active || !glue.probed)return -ENODEV;
     /* Unicast fast path: avoid blocking the network output thread behind
-     * cmd_lock/wiphy_lock while owly_sync_work_run is draining TX bursts. */
+     * cmd_lock/wiphy_lock while owly_sync_work_run is draining TX bursts.
+     * Use wiphy_work_queue (spinlock-serialized) instead of touching the
+     * delayed-work timer without wiphy_lock, and always wake the worker. */
     if (owly_peer_turbo && eth && n >= 55u && !(eth[0] & 1u)) {
         spin_lock(&owly_link_lock);
-        if (owly_link_state.active && owly_link_state.sync_enabled) {
-            const unsigned prev_count = owly_link_state.count;
+        if (owly_link_state.active && owly_link_state.sync_enabled &&
+            !owly_link_state.tx_paused) {
             rc = owly_link_enqueue(&owly_link_state, eth, n, glue_now_us());
             spin_unlock(&owly_link_lock);
-            if (!rc && prev_count == 0u)
-                wiphy_delayed_work_queue(glue_hw()->wiphy, &owly_sync_work, 0);
+            if (!rc)
+                wiphy_work_queue(glue_hw()->wiphy, &owly_sync_work.work);
             return rc;
         }
         spin_unlock(&owly_link_lock);
