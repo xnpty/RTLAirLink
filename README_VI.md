@@ -1,6 +1,6 @@
 # RTLAirLink
 
-Driver Wi‑Fi thử nghiệm cho Realtek RTL8852BE trên macOS Tahoe Intel, có AWDL và AirDrop native.
+Driver Wi‑Fi thử nghiệm cho Realtek RTL8852BE trên macOS Tahoe, có AWDL và AirDrop native.
 
 **Triển khai AWDL native do Anh Tài (xnpty) nghiên cứu, thiết kế và phát triển trong Owly/RTLAirLink.** [Ghi công và lịch sử mã nguồn](CREDITS.md)
 
@@ -8,8 +8,8 @@ Driver Wi‑Fi thử nghiệm cho Realtek RTL8852BE trên macOS Tahoe Intel, có
 
 ## Yêu cầu
 
-- macOS Tahoe 26 trên Intel, card Realtek RTL8852BE và EFI OpenCore đã khởi động được.
-- Python 3.9 trở lên. Trình cài dùng `ocvalidate` của OpenCore 1.0.9 theo mặc định. [Dùng phiên bản OpenCore khác](docs/INSTALL.md)
+- macOS Tahoe 26 trên x86_64 (Intel hoặc AMD), card Realtek RTL8852BE và EFI OpenCore đã khởi động được.
+- Python 3.9 trở lên để chạy trình cài.
 - AirDrop dùng Bluetooth để dò thiết bị. Trình cài có thể thiết lập Bluetooth Realtek USB tương thích.
 
 Wi-Fi cần `Lilu.kext` từ 1.7.3 trở lên và ba kext sau. [Phiên bản và nguồn tải](docs/DEPENDENCIES.md)
@@ -20,17 +20,24 @@ Wi-Fi cần `Lilu.kext` từ 1.7.3 trở lên và ba kext sau. [Phiên bản và
 
 ## Cài v0.2.0
 
+1. Tải và giải nén [RTLAirLink-v0.2.0-Setup.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.2.0-setup/RTLAirLink-v0.2.0-Setup.zip).
+2. Mở `Install-RTLAirLink.command`. Kiểm tra đúng EFI trong bản xem trước, rồi gõ `y` để sao lưu và cài.
+3. Khởi động lại macOS.
+
+Trình cài dùng lại kext tương thích, tải các kext Wi-Fi còn thiếu, xếp đúng thứ tự nạp và tự thêm thiết lập OpenCore cần thiết. [Thứ tự nạp và cách cài thủ công](docs/INSTALL.md)
+
+Để cài qua Terminal, chạy lệnh dưới đây.
+
 ~~~bash
-curl -fL --proto '=https' --proto-redir '=https' -o install-rtlairlink.sh \
-  https://raw.githubusercontent.com/xnpty/RTLAirLink/730d412fa2303e202fed09251d9027a30ce52d37/tools/install-v0.2.0.sh && \
-  bash install-rtlairlink.sh --with-bluetooth
+curl -fLO https://github.com/xnpty/RTLAirLink/releases/download/v0.2.0-setup/install-rtlairlink-setup.sh && \
+  bash install-rtlairlink-setup.sh
 ~~~
 
-Trình cài tải các kext Wi-Fi và thiết lập Bluetooth nếu phát hiện bộ điều khiển Realtek USB tương thích. Trình cài dùng lại kext tương thích đã có, bật kext theo thứ tự và bổ sung `-amfipassbeta` nếu thiếu. Kiểm tra đúng EFI trong bản xem trước, gõ `INSTALL` để sao lưu và áp dụng, rồi khởi động lại. Nếu chỉ cần Wi-Fi, chạy `bash install-rtlairlink.sh`. [Thứ tự nạp và hướng dẫn cài](docs/INSTALL.md)
+Nếu cần cài Bluetooth Realtek USB tương thích, chạy `bash install-rtlairlink-setup.sh --with-bluetooth`. [Thiết lập Bluetooth](docs/INSTALL.md#realtek-bluetooth-for-airdrop)
 
 ## Khắc phục sự cố và báo lỗi
 
-- **Trình cài báo lỗi cấu hình.** Chạy `bash install-rtlairlink.sh --with-bluetooth --efi /Volumes/EFI --dry-run` với đường dẫn EFI của bạn. Nếu dùng OpenCore khác 1.0.9, dùng `--ocvalidate` trỏ tới trình kiểm tra đúng phiên bản. [Hướng dẫn cài](docs/INSTALL.md)
+- **Trình cài báo lỗi cấu hình.** Chạy `bash install-rtlairlink-setup.sh --efi /Volumes/EFI --dry-run` với đường dẫn EFI của bạn. Nếu bản OpenCore có cấu trúc cấu hình khác, dùng `--ocvalidate` trỏ tới trình kiểm tra đi kèm bản đó. [Hướng dẫn kiểm tra EFI](docs/INSTALL.md#preview-and-validate)
 - **macOS không khởi động.** Boot từ EFI OpenCore dự phòng và khôi phục các tệp đã thay. [Khôi phục EFI](docs/INSTALL.md#recover-the-efi)
 - **Wi-Fi biến mất sau khi khởi động lại.** Kiểm tra máy đã boot đúng EFI và xem các kext Wi-Fi đã nạp chưa.
 

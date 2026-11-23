@@ -4,12 +4,14 @@
 """Install the verified RTLAirLink cohort into an existing OpenCore EFI."""
 import argparse
 from datetime import datetime
+from functools import partial
 import json
 import os
 from pathlib import Path, PurePosixPath
 import plistlib
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -42,6 +44,11 @@ MIGRATION_IDS = {'com.rtw89.driver', 'com.rtw89.front', 'com.owly.airlink.eventb
 LEGACY_COMPANION_ID = 'org.franciumos.BroadTek'
 REMOVED_BOOT_ARGS = {'-owlyeb1', '-owlyeb1off', 'owlyebstage'}
 BOOT_ARGS = ('-amfipassbeta',)
+OPENCORE_MOD_KEYS = (
+    ('ACPI', 'Quirks', 'EnableForAll'),
+    ('Booter', 'Quirks', 'EnableForAll'),
+    ('Misc', 'Boot', 'SkipCustomEntryCheck'),
+)
 
 
 def require(condition, message):
@@ -237,7 +244,7 @@ def configure(config, existing, staged, reused, with_bluetooth=False):
             new[index] = dict(current, Enabled=True, PlistPath=entry['PlistPath'],
                               ExecutablePath=entry['ExecutablePath'])
     wifi_index = wifi_at if wifi_at is not None else 0
-    entries[:] = new[:1] + retained[:wifi_index] + new[1:] + retained[wifi_index:]
+    entries[:] = new[:2] + retained[:wifi_index] + new[2:] + retained[wifi_index:]
 
     blocks = config['Kernel']['Block']
     blocks[:] = [item for item in blocks if item['Identifier'] != SKYWALK_ID]
@@ -291,30 +298,51 @@ def diskutil_info(target):
     return plistlib.loads(result)
 
 
+def oc_from_path(setting):
+    path = setting.expanduser().resolve()
+    if path.name.lower() == 'config.plist' and path.is_file():
+        path = path.parent
+    for oc in (path, path / 'OC', path / 'EFI/OC'):
+        if (oc / 'config.plist').is_file() and (oc / 'Kexts').is_dir():
+            return oc
+    return None
+
+
 def find_oc(setting):
-    if setting:
-        volume = setting.resolve()
-        oc = volume / 'EFI/OC'
-        require((oc / 'config.plist').is_file(), f'OpenCore config.plist is missing on {volume}')
+    if setting is not None:
+        oc = oc_from_path(setting)
+        require(oc, f'OpenCore config.plist and Kexts were not found at {setting}')
         return oc
-    candidates = [p for p in Path('/Volumes').iterdir() if (p / 'EFI/OC/config.plist').is_file()]
-    if len(candidates) == 1:
-        return candidates[0] / 'EFI/OC'
-    if not candidates:
-        disks = plistlib.loads(subprocess.check_output(['/usr/sbin/diskutil', 'list', '-plist']))
-        ids = [p['DeviceIdentifier'] for disk in disks['AllDisksAndPartitions']
-               for p in disk.get('Partitions', []) if p.get('Content') == 'EFI']
-        if ids:
-            for index, device in enumerate(ids, 1):
-                print(f'  {index}. EFI partition {device}')
-            selected = select(len(ids), 'EFI partition')
-            device = ids[selected]
-            subprocess.run(['/usr/sbin/diskutil', 'mount', device], check=True)
-            return find_oc(Path(diskutil_info(device)['MountPoint']))
-    require(candidates, 'No OpenCore EFI found. Use --efi with the mounted EFI volume.')
-    for index, volume in enumerate(candidates, 1):
-        print(f'  {index}. {volume}')
-    return candidates[select(len(candidates), 'OpenCore EFI')] / 'EFI/OC'
+
+    mounted = sorted({oc for volume in Path('/Volumes').iterdir() if (oc := oc_from_path(volume))})
+    if mounted:
+        if len(mounted) > 1:
+            for index, oc in enumerate(mounted, 1):
+                print(f'  {index}. {oc}')
+        return mounted[select(len(mounted), 'OpenCore EFI')]
+
+    disks = plistlib.loads(subprocess.check_output(['/usr/sbin/diskutil', 'list', '-plist']))
+    partitions = [part for disk in disks['AllDisksAndPartitions'] for part in disk.get('Partitions', [])
+                  if part.get('Content') == 'EFI' or part.get('VolumeName', '').upper() == 'EFI']
+    while partitions:
+        for index, part in enumerate(partitions, 1):
+            label = part.get('VolumeName') or part['Content']
+            print(f"  {index}. {part['DeviceIdentifier']} ({label})")
+        part = partitions.pop(select(len(partitions), 'EFI partition'))
+        device = part['DeviceIdentifier']
+        result = subprocess.run(['/usr/sbin/diskutil', 'mount', device])
+        if result.returncode == 0:
+            mount_point = diskutil_info(device).get('MountPoint')
+            if mount_point and (oc := oc_from_path(Path(mount_point))):
+                return oc
+            print(f'OpenCore config.plist and Kexts were not found on {device}.')
+    answer = input('Drag the mounted EFI, OC folder, or config.plist here and press Return: ').strip()
+    require(answer, 'Select your mounted OpenCore EFI with --efi /path/to/EFI')
+    if oc := oc_from_path(Path(answer)):
+        return oc
+    paths = shlex.split(answer)
+    require(len(paths) == 1, 'Select your mounted OpenCore EFI with --efi /path/to/EFI')
+    return find_oc(Path(paths[0]))
 
 
 def select(count, label):
@@ -325,9 +353,31 @@ def select(count, label):
     return int(answer)-1
 
 
-def validate_config(validator, config):
+def validate_config(validator, config, stock_validator=False):
     subprocess.run(['/usr/bin/plutil', '-lint', str(config)], check=True)
-    subprocess.run([str(validator), str(config)], check=True)
+    if not stock_validator:
+        subprocess.run([str(validator), str(config)], check=True)
+        return
+
+    # Stock ocvalidate cannot parse these extra OpenCore MOD booleans.
+    # Keep them in the installed plist and validate the stock schema on a copy.
+    standard = read_plist(config)
+    mod_keys = []
+    for section, subsection, key in OPENCORE_MOD_KEYS:
+        options = standard.get(section, {}).get(subsection, {})
+        if key in options:
+            require(isinstance(options[key], bool), f'{section}/{subsection}/{key} must be a boolean')
+            del options[key]
+            mod_keys.append(f'{section}/{subsection}/{key}')
+    with tempfile.TemporaryDirectory(prefix='rtlairlink-ocvalidate-') as folder:
+        target = config
+        if mod_keys:
+            target = Path(folder) / 'config.plist'
+            target.write_bytes(plistlib.dumps(standard, sort_keys=False))
+            print('Preserving OpenCore MOD keys: ' + ', '.join(mod_keys), flush=True)
+        result = subprocess.run([str(validator), str(target)])
+    require(result.returncode == 0,
+            'OpenCore validation failed. Review the errors, or use --ocvalidate with the validator from your OpenCore build.')
 
 
 def write_atomic(target, content):
@@ -342,16 +392,16 @@ def write_atomic(target, content):
         pending.unlink(missing_ok=True)
 
 
-def install(oc, remove, staged, original, candidate, validator, backup_root, reused_files):
+def install(oc, remove, staged, original, candidate, validate, backup_root, reused_files):
     lock = oc / 'RTLAirLink-install.active'
     lock.mkdir()
     try:
-        install_transaction(oc, remove, staged, original, candidate, validator, backup_root, reused_files)
+        install_transaction(oc, remove, staged, original, candidate, validate, backup_root, reused_files)
     finally:
         lock.rmdir()
 
 
-def install_transaction(oc, remove, staged, original, candidate, validator, backup_root, reused_files):
+def install_transaction(oc, remove, staged, original, candidate, validate, backup_root, reused_files):
     live = oc / 'Kexts'
     config = oc / 'config.plist'
     require(config.read_bytes() == original, 'EFI changed after the installation preview')
@@ -395,7 +445,7 @@ def install_transaction(oc, remove, staged, original, candidate, validator, back
                 'Installed kext files differ from the release')
         if candidate != original:
             write_atomic(config, candidate)
-        validate_config(validator, config)
+        validate(config)
     except BaseException:
         if candidate != original and config.read_bytes() == candidate:
             write_atomic(config, original)
@@ -411,15 +461,16 @@ def install_transaction(oc, remove, staged, original, candidate, validator, back
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--efi', type=Path, help='Mounted volume containing EFI/OC')
+    parser.add_argument('--efi', type=Path, help='Mounted EFI volume, OpenCore folder, or config.plist')
     parser.add_argument('--cache', type=Path, default=Path.home()/ 'Downloads/RTLAirLink-Dependencies')
     parser.add_argument('--ocvalidate', type=Path, help='Validator from your OpenCore release')
     parser.add_argument('--with-bluetooth', action='store_true',
                         help='Set up Bluetooth when a supported Realtek USB controller is detected')
     parser.add_argument('--dry-run', action='store_true', help='Validate the plan without writing to the EFI')
-    parser.add_argument('--yes', action='store_true', help='Apply to the explicitly selected --efi volume')
+    parser.add_argument('--yes', action='store_true', help='Apply to the explicitly selected --efi target')
     args = parser.parse_args()
-    require(platform.system() == 'Darwin' and platform.machine() == 'x86_64', 'RTLAirLink requires macOS on Intel')
+    require(platform.system() == 'Darwin' and platform.machine() == 'x86_64',
+            'The installer requires x86_64 macOS (Intel or AMD)')
     require(args.dry_run or platform.release().split('.')[0] == '25', 'This release targets macOS Tahoe')
     require(not args.yes or args.efi is not None, '--yes requires an explicit --efi volume')
     manifest = validate_package(ROOT)
@@ -446,13 +497,14 @@ def main():
         custom_validator = args.ocvalidate.expanduser().resolve() if args.ocvalidate else None
         validator, reused = prepare(ROOT, manifest, existing, args.cache.expanduser(), stage,
                                     custom_validator, with_bluetooth)
+        validate = partial(validate_config, validator, stock_validator=custom_validator is None)
         reused_files = {name: digest_tree(existing / name) for name in reused.values()}
         remove, load_order = configure(config, existing, stage, reused, with_bluetooth)
         changes_config = config != plistlib.loads(original)
         planned = plistlib.dumps(config, sort_keys=False) if changes_config else original
         candidate = Path(path) / 'config.plist'
         candidate.write_bytes(planned)
-        validate_config(validator, candidate)
+        validate(candidate)
         print(f'OpenCore target {oc}')
         print('Load order ' + ', '.join(load_order))
         print('Boot arguments ' + ' '.join(BOOT_ARGS))
@@ -473,8 +525,9 @@ def main():
             print(f'RTLAirLink {VERSION} and its dependencies are already configured.')
             return
         if not args.yes:
-            require(input('Type INSTALL to back up and apply this plan: ').strip() == 'INSTALL', 'Installation cancelled')
-        install(oc, remove, stage, original, planned, validator,
+            answer = input('Back up and install to this EFI? [y/N] ').strip().lower()
+            require(answer in ('y', 'yes', 'install'), 'Installation cancelled')
+        install(oc, remove, stage, original, planned, validate,
                 Path.home()/'Downloads'/'RTLAirLink-Backups', reused_files)
 
 
