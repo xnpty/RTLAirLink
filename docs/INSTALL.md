@@ -1,20 +1,20 @@
-# Install RTLAirLink 0.2.0
+# Install RTLAirLink 0.3.0
 
 Use this release on x86_64 macOS Tahoe with an existing OpenCore installation and a Realtek RTL8852BE. Hardware testing used macOS build 25G241. The automated installer runs on macOS with Python 3.9 or newer.
 
 ## Install with the setup package
 
-1. Download and extract [RTLAirLink-v0.2.0-Setup.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.2.0-setup/RTLAirLink-v0.2.0-Setup.zip).
+1. Download and extract [RTLAirLink-v0.3.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.3.0/RTLAirLink-v0.3.0-x86_64.zip).
 2. Open `Install-RTLAirLink.command` and select your OpenCore EFI if prompted.
 3. Review the target, kexts and boot settings. Enter `y` to back up and apply the changes, then restart macOS.
 
-The installer reuses compatible kexts and downloads missing dependencies from the pinned providers. It verifies the published v0.2.0 kexts and backs up earlier driver and bridge bundles when migrating them. [Dependency versions and checksums](https://github.com/xnpty/RTLAirLink/blob/main/docs/DEPENDENCIES.md)
+The installer reuses compatible kexts and downloads missing dependencies from the pinned providers. It verifies the published v0.3.0 kexts and backs up earlier driver and bridge bundles when migrating them. [Dependency versions and checksums](https://github.com/xnpty/RTLAirLink/blob/main/docs/DEPENDENCIES.md)
 
 To install from Terminal, run the following command.
 
 ~~~bash
-curl -fLO https://github.com/xnpty/RTLAirLink/releases/download/v0.2.0-setup/install-rtlairlink-setup.sh && \
-  bash install-rtlairlink-setup.sh
+curl -fLO https://github.com/xnpty/RTLAirLink/releases/download/v0.3.0/install-rtlairlink.sh && \
+  bash install-rtlairlink.sh
 ~~~
 
 ## Preview and validate

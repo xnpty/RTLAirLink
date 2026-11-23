@@ -1,5 +1,5 @@
 {
-  "Info.plist": "014f55b2c537adaec1191eaa42a89b6e57f1cc9b0a27a60a7e5b14fe0c32c209",
+  "Info.plist": "8eaafbc41e2eb426be982fd6b133da41b8ef0a2ae1f7772971960d81f3857718",
   "LICENSE": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
   "Makefile": "ae6f4933088389acc16d1584b3def5ab4aa2666ec9d7eedd76dea3274a4d185d",
   "SDK_LOCK.json": "849de90e303bf622e548332b471f1180255e2f09336a6da240752dcd4637b7f0",
@@ -17,7 +17,7 @@
   "src/OwlyStatus.hpp": "96f29ab085c15728706dc6496668b8ff2693a663e4a5d1497fffe87b20d18d91",
   "src/OwlyTargets.hpp": "d8ba0b2f9225f67f49fd3d2b9a7f9554bda0450b43b95d791903c481b1a1f37d",
   "src/Plugin.cpp": "e66fd23b07381ab0b26acea4c28ae5ccfdae584bb9e3384e142a30f29608d7cf",
-  "src/ReleaseVersion.hpp": "ff113cab25cac83ec3b549ff2e36699bd01e077407bb26cee0203aa36910ba4f",
+  "src/ReleaseVersion.hpp": "15defb46811bde9ea4d06d542bcb7f2aa9e1065a299bcf695803e6a183c10ad0",
   "src/Service.cpp": "10577555af2dfe297bde82d3c46e1541a88d0d7dbc634d40d8a05fdddb4423f9",
   "src/Status.cpp": "c3ee63dbcad2b5325cbff659fa57285bbe4ccdf79c1f4f7e9611cc286495e222",
   "src/kmod_info.c": "233e59c2d59c1e7d71c9830251a12a47903384743bd481d93238c2f6d525fe7a",

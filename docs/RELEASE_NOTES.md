@@ -1,10 +1,8 @@
-# RTLAirLink v0.2.0
+# RTLAirLink v0.3.0
 
 Native AWDL for Realtek was researched, designed, and originally implemented by Anh Tài (xnpty) in Owly/RTLAirLink. [Credits and source history](../CREDITS.md)
 
-- Native AWDL scheduling advertises the radio's 20 MHz data channels and actual availability slots.
-- The driver contains the receive CAM, Block Ack and IPv6 delivery corrections from the validated hardware build.
-- The matched backend, frontend and event bridge now use RTLAirLink executables, classes and bundle IDs.
-- The installer fetches pinned dependencies and validates an OpenCore configuration before applying a backed-up update.
-
-This is an experimental release. Companion discovery remains intermittent on the hardware tested. [Verification details](STATUS.md)
+- **VHT 80 MHz 2SS & 64 KB RX A-MPDU AWDL negotiation:** Implements `APPLE80211_IOC_HT_CAPABILITY` (`154`) and `APPLE80211_IOC_VHT_CAPABILITY` (`214`) in the 18-byte Legacy ABI, emits 802.11 VHT Capabilities (`TLV 17`) in PSF/MIF frames, and advertises 80 MHz operating class `128` (`0x7c`) channel sequences on 5 GHz.
+- **Bidirectional hardware BlockAck (TX & RX A-MPDU):** Promotes unicast AWDL IPv6 data frames to QoS Data (`0x88`), negotiates TID 0 TX ADDBA Request/Response with automatic Non-QoS fallback and idle/session resync, enables hardware A-MPDU aggregation (`agg_en`, `ampdu_num = 63`, `tx_cnt_lmt = 12`), and assigns the auxiliary P2P-client VIF to high Address CAM index (`31`) so per-peer `NET_TYPE_AD_HOC` entries match first (`rx_mac_id == sta_mac_id`) for hardware RX BlockAck.
+- **High-throughput TX/RX pipeline & NAPI fairness:** Expands the native AWDL TX queue to 512 frames with 32-frame burst draining and batched PCI doorbells, expands the RX reorder delivery queue to 1024 frames with 32-packet batch delivery, uses spinlock-serialized `wiphy_work_queue` for unicast output wakeups, reserves NAPI budget for `RXQ` during heavy `RPQ` TX completion bursts, and holds the active 5 GHz data channel during unicast TX.
+- **Live hardware benchmarks (`awdl0` / `transport: "awdl"` on RTL8852BE, macOS Tahoe 25G241):** Reaches **50.77 MB/s** (`406.2 Mbps`, 182 MB in 3.59 s — **19.9× faster** than baseline 2.55 MB/s) Mac-to-iPhone and **24.97 MB/s** (`200 Mbps`, 32 MiB in 1.34 s — **11.8× faster** than 2.12 MB/s) iPhone-to-Mac. [Verification details](STATUS.md)

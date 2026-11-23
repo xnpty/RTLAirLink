@@ -18,9 +18,9 @@ Wi-Fi uses `Lilu.kext` (1.7.3 or newer) and three legacy dependencies. [Versions
 - `IO80211FamilyLegacy.kext`
 - `AMFIPass.kext`
 
-## Install v0.2.0
+## Install v0.3.0
 
-1. Download and extract [RTLAirLink-v0.2.0-Setup.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.2.0-setup/RTLAirLink-v0.2.0-Setup.zip).
+1. Download and extract [RTLAirLink-v0.3.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.3.0/RTLAirLink-v0.3.0-x86_64.zip).
 2. Open `Install-RTLAirLink.command`. Check the EFI in the preview and enter `y` to back up and install.
 3. Restart macOS.
 
@@ -29,11 +29,11 @@ The installer uses compatible kexts already on the EFI, downloads missing Wi-Fi 
 To install from Terminal, run the following command.
 
 ~~~bash
-curl -fLO https://github.com/xnpty/RTLAirLink/releases/download/v0.2.0-setup/install-rtlairlink-setup.sh && \
-  bash install-rtlairlink-setup.sh
+curl -fLO https://github.com/xnpty/RTLAirLink/releases/download/v0.3.0/install-rtlairlink.sh && \
+  bash install-rtlairlink.sh
 ~~~
 
-For a supported Realtek USB Bluetooth controller, run `bash install-rtlairlink-setup.sh --with-bluetooth`. [Bluetooth setup](docs/INSTALL.md#realtek-bluetooth-for-airdrop)
+For a supported Realtek USB Bluetooth controller, run `bash install-rtlairlink.sh --with-bluetooth`. [Bluetooth setup](docs/INSTALL.md#realtek-bluetooth-for-airdrop)
 
 | Bundle | Role |
 | --- | --- |
@@ -57,7 +57,7 @@ Include the macOS version and build (`sw_vers`), OpenCore version, Wi-Fi card an
 
 ## Status
 
-The hardware test used an RTL8852BE on macOS build 25G241 with Bluetooth configured separately. The driver source underlying this release completed transfers both ways over IPv6 on awdl0. Six of eight Mac-to-iPhone sends succeeded, and eight iPhone-to-Mac transfer matched the original SHA-256. Two sends stalled during Companion discovery. The v0.2.0 binaries have build and installer checks. Their first hardware boot is pending. [Verification details](docs/STATUS.md)
+Hardware verified on an RTL8852BE running macOS Tahoe build 25G241 with OpenCore 1.0.9. With VHT 80 MHz 2SS capability negotiation and bidirectional hardware BlockAck (TX/RX A-MPDU) enabled in v0.3.0, AirDrop transfers directly over `awdl0` (`transport: "awdl"`) reach up to **50.77 MB/s** (`406.2 Mbps`, 182 MB in 3.59 s) Mac-to-iPhone and **24.97 MB/s** (`200 Mbps`, 32 MiB in 1.34 s) iPhone-to-Mac with zero hangs. [Verification details](docs/STATUS.md)
 
 ## Build
 

@@ -20,7 +20,7 @@ import zipfile
 
 from download_dependencies import LOCK, ROOT, dependency_entries, fetch, sha, unpack_bundle
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 DRIVER = 'RTLAirLink.kext'
 FRONT = f'{DRIVER}/Contents/PlugIns/RTLAirLinkFront.kext'
 BRIDGE = 'RTLAirBridge.kext'
