@@ -9,7 +9,11 @@
  * A peer here is observed link-layer state, not authenticated AirDrop identity.
  * Host RX time gives software timing; it is not a hardware TSF measurement. */
 #define OWLY_LINK_PEERS 8u
+#if defined(RTW89_MACOS)
+#define OWLY_LINK_QUEUE 2048u
+#else
 #define OWLY_LINK_QUEUE 512u
+#endif
 #define OWLY_LINK_QUEUE_WORDS ((OWLY_LINK_QUEUE + 63u) / 64u)
 #define OWLY_LINK_FRAME_MAX 2048u
 #define OWLY_LINK_PEER_TTL_US 2000000ull

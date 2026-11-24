@@ -2085,8 +2085,6 @@ static void glue_tx_status(void *ctx, struct sk_buff *skb)
         const bool local=owly_link_state.active && !memcmp(skb->data+10,owly_link_state.local,6);
         if(local && !multicast && done)++owly_link_state.tx_radio_acked;
         spin_unlock(&owly_link_lock);
-        if(local && !multicast)
-            __atomic_store_n(&owly_tx_reclaimed, true, __ATOMIC_RELEASE);
         if(local) {
             static volatile unsigned long mdns_reports,other_reports;
             /* The TX builder puts IPv6 at offset 40 (Non-QoS) or 42 (QoS). */
@@ -2100,6 +2098,8 @@ static void glue_tx_status(void *ctx, struct sk_buff *skb)
                       "device_done=%u\n",count,(unsigned)mdns,(unsigned)multicast,(unsigned)done);
         }
     }
+    if (__atomic_load_n(&owly_tx_ring_stalled, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&owly_tx_reclaimed, true, __ATOMIC_RELEASE);
 #endif
 #if defined(RTW89_AWDL_CORE04F_ONE_SHOT) && RTW89_AWDL_CORE04F_ONE_SHOT
     if (skb && owly_core04f_is_probe(skb->data, skb->len))
@@ -2452,6 +2452,18 @@ static int owly_aux_program_cam(struct ieee80211_hw *hw, struct ieee80211_vif *v
           (unsigned)link->port, (unsigned)link->addr_cam.addr_cam_idx,
           (unsigned)link->bssid_cam.bssid_cam_idx, ret);
     return ret;
+}
+
+static bool owly_aux_cam_ready(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+{
+    struct rtw89_dev *rtwdev = hw ? hw->priv : NULL;
+    struct rtw89_vif_link *link;
+
+    if (!rtwdev || rtwdev->chip->chip_id != RTL8852B || !vif || !vif->p2p)
+        return false;
+    link = rtw89_get_designated_link(vif_to_rtwvif(vif));
+    return link && link->addr_cam.valid && link->bssid_cam.valid &&
+           ether_addr_equal(link->mac_addr, vif->addr);
 }
 #endif
 
@@ -2971,8 +2983,14 @@ static void owly_radio_maybe_attach(void)
     if (owly_radio_is_bound(&owly_radio_state)) {
         struct rtw89_mlme_status st;
         rtw89_mlme_get_status(&st);
+        /* When Port 1 (owly_core04c_vif) already owns its high-index AWDL
+         * Address CAM + BSSID CAM on RTL8852B, do NOT overwrite Port 0's
+         * index-0 Address CAM with awdl0's MAC — doing so shadows per-peer
+         * AD_HOC CAM entries (index 1+) and breaks hardware RX BlockAck in
+         * standalone mode. */
         if(st.awdl_channel_owned && !glue.scanning &&
-           !owly_sync_state.explicitly_disabled) {
+           !owly_sync_state.explicitly_disabled &&
+           !owly_aux_cam_ready(hw, owly_core04c_vif)) {
             const int address_rc=rtw89_mlme_awdl_set_self_addr(owly_core04c_vif->addr);
             if(address_rc) {
                 owly_radio_state.last_error=address_rc;

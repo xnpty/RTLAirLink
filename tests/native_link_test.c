@@ -273,6 +273,19 @@ static void control_reply_slot(void)
     CHECK(owly_link_unicast_reply_tx_ready(&link_state,remote,2006000));
     CHECK(!owly_link_unicast_reply_tx_ready(&link_state,remote,2000000+2*16384+15360));
     CHECK(!owly_link_unicast_reply_tx_ready(&link_state,remote,2000000+3*16384+6000));
+    /* In a '.' (0) slot, recent RX data on our channel permits immediate
+     * unicast replies/ACKs, while explicit other channels (ch 6) still gate. */
+    const uint64_t slot1=2000000+3*16384+6000;
+    p->channels[1]=0;
+    CHECK(!owly_link_unicast_reply_tx_ready(&link_state,remote,slot1));
+    p->last_data_rx_us=slot1-1000;
+    CHECK(owly_link_unicast_reply_tx_ready(&link_state,remote,slot1));
+    CHECK(!owly_link_unicast_action_tx_ready(&link_state,remote,slot1));
+    p->last_data_rx_us=slot1-OWLY_LINK_AW_US-1;
+    CHECK(!owly_link_unicast_reply_tx_ready(&link_state,remote,slot1));
+    p->channels[1]=6;p->last_data_rx_us=slot1-1000;
+    CHECK(!owly_link_unicast_reply_tx_ready(&link_state,remote,slot1));
+    p->last_data_rx_us=0;
     uint8_t other[6];memcpy(other,remote,6);other[5]^=2;
     CHECK(!owly_link_unicast_reply_tx_ready(&link_state,other,2006000));
     link_state.tx_paused=true;

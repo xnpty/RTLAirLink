@@ -397,7 +397,17 @@ static bool shared_slot_open(const struct owly_link_peer *p,uint8_t channel,
                              enum owly_link_tx_kind kind)
 {
     const unsigned slot=(seq/4u)&15u;
-    if(p->channels[slot]!=channel)return false;
+    if(p->channels[slot]!=channel) {
+        /* A '.' (0) slot is unspecified/infra, not another social channel.
+         * If the peer just sent us unicast data/ACKs on this channel within
+         * the current AW, keep unicast TX/ACKs flowing instead of stalling
+         * 200+ ms waiting for the next advertised slot. */
+        if (kind == OWLY_LINK_TX_UNICAST && p->channels[slot] == 0u &&
+            p->channel == channel && p->last_data_rx_us &&
+            now >= p->last_data_rx_us && now - p->last_data_rx_us <= OWLY_LINK_AW_US)
+            return true;
+        return false;
+    }
     /* A real MIF or IPv6 packet in this AW gives us an opportunity to
      * transmit even after the initial wake interval. */
     const uint64_t heard=p->last_mif_rx_us>p->last_data_rx_us ?
@@ -759,16 +769,27 @@ int owly_link_next_tx(struct owly_native_link *s,uint64_t now,bool first_mif_sub
     if(!s || !out || !n || !offset || !generation || cap<OWLY_LINK_FRAME_MAX)return -EINVAL;
     *n=0;expire(s,now);
     if(!s->active || !s->sync_enabled || s->tx_paused)return 0;
+    uint8_t blocked_dst[6]={0};
+    bool have_blocked_dst=false;
     for(unsigned i=0;i<s->count;) {
         f=&s->queue[s->queue_order[(s->head+i)%OWLY_LINK_QUEUE]];
         if(now<f->queued_us || now-f->queued_us>OWLY_LINK_TX_TTL_US+f->pause_credit_us ||
            f->generation!=s->generation) {
             remove_queued(s,i);++s->tx_expired;continue;
         }
+        if(f->kind==OWLY_LINK_TX_UNICAST && have_blocked_dst &&
+           !memcmp(f->destination,blocked_dst,6)) {
+            ++i;
+            continue;
+        }
         if((f->awaiting_first_mif && !first_mif_submitted) ||
            !can_send(s,f->destination,now,f->kind)) {
             /* A held startup announcement or peer must not block a ready
              * unicast reply to a different peer. */
+            if(f->kind==OWLY_LINK_TX_UNICAST && !have_blocked_dst) {
+                memcpy(blocked_dst,f->destination,6);
+                have_blocked_dst=true;
+            }
             ++i;
             continue;
         }
