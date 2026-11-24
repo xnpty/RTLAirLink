@@ -10,8 +10,8 @@ static bool eligible(const struct owly_abi6_rx_context *s)
     if (!s || !s->crc_ok || (!s->sta_connected && !s->standalone_channel) ||
         !s->aux_present || s->scanning)
         return false;
-    if (s->standalone_channel && (!s->sta_width_mhz || s->sta_width_mhz != 20u ||
-        s->rx_freq_mhz != s->sta_freq_mhz)) return false;
+    if (s->standalone_channel && s->sta_width_mhz != 20u &&
+        s->sta_width_mhz != 40u && s->sta_width_mhz != 80u) return false;
     /* Reported RX freq can mean the primary 20 MHz channel or the
      * actual associated channel center. Never admit arbitrary +/-30 MHz
      * frames: the secondary path requires the negotiated center and width. */

@@ -68,8 +68,11 @@ int rtw89_mlme_awdl_hold_channel(u16 freq)
         return -EBUSY;
     if (freq != 2437 && freq != 5220 && freq != 5745) return -EINVAL;
     chan = ieee80211_get_channel(mlme.hw->wiphy, freq);
-    if (!chan || (chan->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_IR |
-                                IEEE80211_CHAN_RADAR))) return -EACCES;
+    if (!chan || (chan->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_RADAR)))
+        return -EACCES;
+    if ((chan->flags & IEEE80211_CHAN_NO_IR) &&
+        !rtw89_cfg80211_awdl_5g_ok(mlme.hw->wiphy, freq))
+        return -EACCES;
     if (mlme.awdl_chanctx && mlme.chan == chan) return 0;
     ops = mlme.local->ops;
     if (!ops->add_chanctx || !ops->remove_chanctx ||
@@ -77,8 +80,29 @@ int rtw89_mlme_awdl_hold_channel(u16 freq)
     ctx = kzalloc(sizeof(*ctx) + mlme.hw->chanctx_data_size, GFP_KERNEL);
     if (!ctx) return -ENOMEM;
     cfg80211_chandef_create(&chandef, chan, NL80211_CHAN_NO_HT);
+    {
+        struct ieee80211_supported_band *sband = mlme.hw->wiphy->bands[chan->band];
+        if (chan->band == NL80211_BAND_5GHZ && sband && sband->vht_cap.vht_supported &&
+            (freq == 5745 || freq == 5220)) {
+            const u32 center = freq == 5745 ? 5775u : 5210u;
+            bool ok80 = true;
+            for (u32 f = center - 30u; f <= center + 30u; f += 20u) {
+                struct ieee80211_channel *sub = ieee80211_get_channel(mlme.hw->wiphy, (int)f);
+                if (!sub || (sub->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_RADAR))) {
+                    ok80 = false;
+                    break;
+                }
+            }
+            if (ok80) {
+                chandef.width = NL80211_CHAN_WIDTH_80;
+                chandef.center_freq1 = center;
+                chandef.center_freq2 = 0;
+            }
+        }
+        ctx->rx_chains_static = ctx->rx_chains_dynamic =
+            (sband && sband->ht_cap.ht_supported && sband->ht_cap.mcs.rx_mask[1]) ? 2 : 1;
+    }
     ctx->def = ctx->min_def = chandef;
-    ctx->rx_chains_static = ctx->rx_chains_dynamic = 1;
     if (mlme.awdl_chanctx) owly_mlme_release_chanctx();
     ret = ops->add_chanctx(mlme.hw, ctx);
     if (ret) { kfree(ctx); return ret; }
@@ -94,7 +118,9 @@ int rtw89_mlme_awdl_hold_channel(u16 freq)
     mlme.chanctx = ctx; mlme.chanctx_assigned = true; mlme.awdl_chanctx = true;
     mlme.chan = chan; mlme.sband = mlme.hw->wiphy->bands[chan->band];
     mlme.chandef = chandef;
-    mlme_info("AWDL owns %u MHz / 20 MHz; station remains unassociated", freq);
+    mlme_info("AWDL owns %u MHz / %u MHz (%u chains); station remains unassociated",
+              freq, chandef.width == NL80211_CHAN_WIDTH_80 ? 80u : 20u,
+              (unsigned)ctx->rx_chains_static);
     return 0;
 }
 

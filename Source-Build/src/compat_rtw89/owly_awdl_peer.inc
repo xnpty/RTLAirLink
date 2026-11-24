@@ -114,11 +114,11 @@ static void owly_peer_delivery_run(struct work_struct *work)
 {
  (void)work;
  /* Ordinary RX work: Apple's input may call back into cmd/wiphy. */
- struct {struct sk_buff *skb;bool deliver;} batch[32];
+ struct {struct sk_buff *skb;bool deliver;} batch[64];
  for(;;){
   unsigned n=0;
   spin_lock(&owly_peer_lock);
-  while(n<32u && owly_peer_ready_count){
+  while(n<64u && owly_peer_ready_count){
    const unsigned at=owly_peer_ready_head;
    batch[n].skb=owly_peer_ready[at].skb;
    batch[n].deliver=glue.up && owly_peer_accepting && owly_peer_ready[at].generation==owly_peer_generation;
@@ -173,6 +173,10 @@ static uint8_t owly_peer_bound_width(void)
 {
  if (!owly_peer_turbo || !owly_core04c_vif)
   return 20u;
+#ifdef OWLY_MC_BUILT
+ if (owly_mc.enabled && !owly_mc.home)
+  return owly_mc_channel_width(glue_hw()->wiphy, owly_mc.channel);
+#endif
  const struct cfg80211_chan_def *def = &owly_core04c_vif->bss_conf.chanreq.oper;
  if (!def->chan || def->chan->band != NL80211_BAND_5GHZ)
   return 20u;

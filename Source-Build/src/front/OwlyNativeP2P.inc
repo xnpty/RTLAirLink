@@ -155,9 +155,10 @@ void RTLAirLinkFront::owlyNativeCapture(IO80211VirtualInterface *vif,IO80211Peer
     if(!vif || !peer || !peer->metaCast("IO80211AWDLPeerManager"))return;
     vif->retain();peer->retain();
     IOLockLock(_owlyVifLock);
-    if(!_owlyNativeClosed && !_owlyNativeUsers) {
+    if(!_owlyNativeClosed && !_owlyNativeUsers && !_owlyNativeDataUsers) {
         oldPeer=_owlyNativePeer;oldVif=_owlyNativePeerVif;
-        _owlyNativePeer=peer;_owlyNativePeerVif=vif;_owlyNativeEnabled=false;
+        _owlyNativePeer=peer;_owlyNativePeerVif=vif;
+        __atomic_store_n(&_owlyNativeEnabled,false,__ATOMIC_RELEASE);
         _owlyNativeEnableIssued=false;_owlyNativeProgrammedChannel=0;
         _owlyNativeProgrammedGeneration=0;
         _owlyNativeHaveWindow=false;peer=nullptr;vif=nullptr;
@@ -191,6 +192,29 @@ void RTLAirLinkFront::owlyNativeRelease(IO80211VirtualInterface *vif,OSObject *p
     peer->release();vif->release();
     owlyFinishDeferredStop();release();
 }
+bool RTLAirLinkFront::owlyNativeAcquireData(IO80211VirtualInterface **vif)
+{
+    *vif=nullptr;
+    IOLockLock(_owlyVifLock);
+    bool ok=!_owlyNativeClosed && !_owlyAWDLStopping && !_owlyVifBusy &&
+        _owlyNativePeerVif && __atomic_load_n(&_owlyNativeEnabled,__ATOMIC_ACQUIRE) &&
+        _owlyAirlink.enabled && _owlyAirlink.cookie==_owlyNativePeerVif;
+    if(ok) {
+        *vif=_owlyNativePeerVif;
+        (*vif)->retain();retain();
+        ++_owlyNativeDataUsers;
+    }
+    IOLockUnlock(_owlyVifLock);return ok;
+}
+void RTLAirLinkFront::owlyNativeReleaseData(IO80211VirtualInterface *vif)
+{
+    IOLockLock(_owlyVifLock);
+    --_owlyNativeDataUsers;
+    if(!_owlyNativeDataUsers)IOLockWakeup(_owlyVifLock,&_owlyNativeUsers,false);
+    IOLockUnlock(_owlyVifLock);
+    vif->release();
+    owlyFinishDeferredStop();release();
+}
 void RTLAirLinkFront::owlyNativeStop()
 {
     if(!_owlyVifLock)return;
@@ -201,10 +225,11 @@ void RTLAirLinkFront::owlyNativeStop()
     if(canceled && _owlyNativePending) {_owlyNativePending=false;releasePending=true;}
     /* stop() defers a call from the owner before reaching this method.
      * No timeout permits an Apple call to outlive VIF teardown. */
-    while(_owlyNativeUsers && _owlyNativeOwnerThread!=current_thread())
+    while((_owlyNativeUsers && _owlyNativeOwnerThread!=current_thread()) || _owlyNativeDataUsers)
         IOLockSleep(_owlyVifLock,&_owlyNativeUsers,THREAD_UNINT);
     peer=_owlyNativePeer;vif=_owlyNativePeerVif;
-    _owlyNativePeer=nullptr;_owlyNativePeerVif=nullptr;_owlyNativeEnabled=false;
+    _owlyNativePeer=nullptr;_owlyNativePeerVif=nullptr;
+    __atomic_store_n(&_owlyNativeEnabled,false,__ATOMIC_RELEASE);
     _owlyNativeEnableIssued=false;_owlyNativeProgrammedChannel=0;
     _owlyNativeProgrammedGeneration=0;
     IOLockUnlock(_owlyVifLock);
@@ -225,7 +250,7 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
         self->backLeave();
         const bool abiReady=self->getProperty("OwlyNativeABIReady")==kOSBooleanTrue;
         if(!window.active)self->_owlyNativeHaveWindow=false;
-        if(ready || !abiReady)self->_owlyNativeEnabled=false;
+        if(ready || !abiReady)__atomic_store_n(&self->_owlyNativeEnabled,false,__ATOMIC_RELEASE);
         if(!ready && abiReady && self->_workLoop && !self->_workLoop->inGate()) {
             struct GateRead {IO80211VirtualInterface *vif;OSObject *peer,*bound;
                 owly_native_peer_gate value;bool valid,matches;}
@@ -249,7 +274,8 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
                 IOLockLock(self->_owlyVifLock);
                 if(!self->_owlyNativeClosed && self->_owlyNativePeer==peer && self->_owlyNativePeerVif==vif) {
                     stale=self->_owlyNativePeer;self->_owlyNativePeer=gate.bound;gate.bound=nullptr;
-                    self->_owlyNativeEnabled=false;self->_owlyNativeEnableIssued=false;
+                    __atomic_store_n(&self->_owlyNativeEnabled,false,__ATOMIC_RELEASE);
+                    self->_owlyNativeEnableIssued=false;
                     self->_owlyNativeProgrammedChannel=0;self->_owlyNativeProgrammedGeneration=0;
                     self->_owlyNativeHaveWindow=false;self->_owlyNativeRepairAfterUS=0;
                     ++self->_owlyNativePeerRebindings;
@@ -266,7 +292,7 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
                 !layoutReady || !owly_native_peer_rx_open(&gate.value);
             if(publishGate)self->setProperty("OwlyNativePeerLayoutReady",layoutReady);
             if(!layoutReady) {
-                self->_owlyNativeEnabled=false;
+                __atomic_store_n(&self->_owlyNativeEnabled,false,__ATOMIC_RELEASE);
                 self->owlyNativeRelease(vif,peer);
                 self->owlyNativeSchedule(100000);
                 IOLockLock(self->_owlyVifLock);self->_owlyNativeCallbackThread=nullptr;IOLockUnlock(self->_owlyVifLock);
@@ -286,7 +312,7 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
              * Native SET134/interface events can close SYNC_ACTIVE without
              * changing the frontend's cached bool. Restore via native APIs. */
             if(self->_owlyNativeEnabled && !(gate.value.flags&OWLY_NATIVE_PEER_SYNC_ACTIVE)) {
-                self->_owlyNativeEnabled=false;
+                __atomic_store_n(&self->_owlyNativeEnabled,false,__ATOMIC_RELEASE);
                 self->_owlyNativeHaveWindow=false;
                 ++self->_owlyNativeGateRecoveries;
                 self->setProperty("OwlyNativeGateRecoveries",self->_owlyNativeGateRecoveries,64);
@@ -359,7 +385,7 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
                         self->_owlyNativeHaveWindow=false;
                     }
                 }
-                self->_owlyNativeEnabled=result==0;
+                __atomic_store_n(&self->_owlyNativeEnabled,result==0,__ATOMIC_RELEASE);
                 if(!newEpoch && !(gate.value.flags&OWLY_NATIVE_PEER_SYNC_ACTIVE))
                     self->_owlyNativeRepairAfterUS=window.sampled_us+500000u;
                 self->setProperty("OwlyNativeEnableResult",static_cast<unsigned long long>(static_cast<uint32_t>(result)),32);
@@ -422,7 +448,7 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
             self->setProperty("OwlyNativeTXRadioACK",window.tx_radio_acked,64);
             self->setProperty("OwlyNativeActionCalls",self->_owlyNativeActionCalls,64);
             self->setProperty("OwlyNativeActionAllocFailures",self->_owlyNativeActionAllocFailures,64);
-            self->setProperty("OwlyNativeDataCalls",self->_owlyNativeDataCalls,64);
+            self->setProperty("OwlyNativeDataCalls",__atomic_load_n(&self->_owlyNativeDataCalls,__ATOMIC_RELAXED),64);
             self->setProperty("OwlyNativeWindowCalls",self->_owlyNativeWindowCalls,64);
             self->setProperty("OwlyNativeLocalMAC",owlyNativeMacValue(window.local),64);
         }
@@ -437,6 +463,29 @@ bool RTLAirLinkFront::owlyNativeReceive(const struct owly_abi6_packet *pkt)
     if(!pkt || !pkt->channel || !pkt->received_us ||
        (pkt->kind==OWLY_ABI6_PACKET_ACTION && pkt->rssi>=0) ||
        (pkt->kind!=OWLY_ABI6_PACKET_ACTION && pkt->kind!=OWLY_ABI6_PACKET_IPV6))return false;
+    /* IPv6 data packets never touch IO80211AWDLPeerManager or the workloop.
+     * Keep them independent of _owlyVifMethodBusy so 16ms timer ticks and
+     * action-frame processing never drop already-BlockAcked IPv6 MPDUs. */
+    if(pkt->kind==OWLY_ABI6_PACKET_IPV6) {
+        if(pkt->length<40 || pkt->length>OWLY_ABI6_PACKET_MAX_IPV6)return false;
+        IO80211VirtualInterface *vif=nullptr;
+        if(!owlyNativeAcquireData(&vif))return false;
+        bool submitted=false;
+        size_t length=14u+pkt->length;mbuf_t m=allocatePacket(static_cast<UInt32>(length));
+        if(m && mbuf_len(m)>=length) {
+            auto *bytes=static_cast<uint8_t *>(mbuf_data(m));
+            memcpy(bytes,pkt->dst,6);memcpy(bytes+6,pkt->src,6);bytes[12]=0x86;bytes[13]=0xdd;
+            memcpy(bytes+14,pkt->bytes,pkt->length);
+            /* Same data route as the reference RTL software stack. The glue
+             * already admitted the real recent peer/channel/destination and
+             * decoded IPv6. pushPacket owns m and feeds the real awdl ifnet;
+             * no opaque packet_info_tag layout or fabricated native peer. */
+            owly_vif_push(vif,m);
+            __atomic_add_fetch(&_owlyNativeDataCalls,1u,__ATOMIC_RELAXED);
+            submitted=true;
+        } else if(m)freePacket(m);
+        owlyNativeReleaseData(vif);return submitted;
+    }
     IO80211VirtualInterface *vif;OSObject *peer;
     if(!owlyNativeAcquire(&vif,&peer))return false;
     bool submitted=false;
@@ -563,19 +612,6 @@ bool RTLAirLinkFront::owlyNativeReceive(const struct owly_abi6_packet *pkt)
                 setProperty("OwlyNativeActionAllocFailures",_owlyNativeActionAllocFailures,64);
             }
         }
-    } else if(_owlyNativeEnabled && pkt->kind==OWLY_ABI6_PACKET_IPV6 && pkt->length>=40 && pkt->length<=OWLY_ABI6_PACKET_MAX_IPV6) {
-        size_t length=14u+pkt->length;mbuf_t m=allocatePacket(static_cast<UInt32>(length));
-        if(m && mbuf_len(m)>=length) {
-            auto *bytes=static_cast<uint8_t *>(mbuf_data(m));
-            memcpy(bytes,pkt->dst,6);memcpy(bytes+6,pkt->src,6);bytes[12]=0x86;bytes[13]=0xdd;
-            memcpy(bytes+14,pkt->bytes,pkt->length);
-            /* Same data route as the reference RTL software stack. The glue
-             * already admitted the real recent peer/channel/destination and
-             * decoded IPv6. pushPacket owns m and feeds the real awdl ifnet;
-             * no opaque packet_info_tag layout or fabricated native peer. */
-            owly_vif_push(vif,m);
-            ++_owlyNativeDataCalls;submitted=true;
-        } else if(m)freePacket(m);
     }
     owlyNativeRelease(vif,peer);return submitted;
 }

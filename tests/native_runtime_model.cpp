@@ -513,10 +513,16 @@ static void drain_before_stop() {
     {std::lock_guard<std::mutex> lock(actionMutex);blockAction=true;enteredAction=releaseAction=false;}
     std::thread rx([&]{CHECK(f.front.owlyNativeReceive(&pkt));});
     {std::unique_lock<std::mutex> lock(actionMutex);actionCondition.wait(lock,[]{return enteredAction;});}
+    /* IPv6 data RX must not be dropped while an Action call or tick holds _owlyVifMethodBusy. */
+    auto ipv6=pkt;ipv6.kind=OWLY_ABI6_PACKET_IPV6;ipv6.length=48;memset(ipv6.bytes,0,48);
+    ipv6.bytes[0]=0x60;ipv6.bytes[5]=8;
+    const unsigned beforeData=dataCalls.load();
+    CHECK(f.front.owlyNativeReceive(&ipv6));
+    CHECK(dataCalls.load()==beforeData+1 && f.front._owlyNativeDataUsers==0);
     std::atomic<bool> finished{false};std::thread stop([&]{f.front.owlyNativeStop();finished=true;});
     std::this_thread::sleep_for(std::chrono::milliseconds(10));CHECK(!finished);
     {std::lock_guard<std::mutex> lock(actionMutex);releaseAction=true;actionCondition.notify_all();}
-    rx.join();stop.join();CHECK(finished && f.front._owlyNativeUsers==0);
+    rx.join();stop.join();CHECK(finished && f.front._owlyNativeUsers==0 && f.front._owlyNativeDataUsers==0);
     blockAction=false;
 }
 int main(){native_registration_uses_exact_native_lookup();native_registration_repairs_only_processed_remote_frames();native_registration_failure_and_backoff_are_not_admission();native_registration_respects_rssi_validation_identity_and_stop();zero_length_action_allocation();current_vif_peer_rebinding();native_processing_is_not_call_success();native_gate_recovery();native_recovery_backoff();readiness_and_ownership();reentrant_stop();window_and_corrupt_guard();legacy_window_channel_and_time();native_programming_results();session_epoch_commit_and_reenable();drain_before_stop();CHECK(allocations==frees);printf("native frontend production runtime: %u checks passed; mocked kernel boundaries\n",checks);}

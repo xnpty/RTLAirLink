@@ -116,13 +116,15 @@ private:
     bool owlyNativeReceive(const struct owly_abi6_packet *);
     bool owlyNativeAcquire(IO80211VirtualInterface **,OSObject **);
     void owlyNativeRelease(IO80211VirtualInterface *,OSObject *);
+    bool owlyNativeAcquireData(IO80211VirtualInterface **);
+    void owlyNativeReleaseData(IO80211VirtualInterface *);
     thread_call_t _owlyNativeCall=nullptr;
     thread_t _owlyNativeCallbackThread=nullptr;
     thread_t _owlyNativeOwnerThread=nullptr;
     OSObject *_owlyNativePeer=nullptr;
     IO80211VirtualInterface *_owlyNativePeerVif=nullptr;
     bool _owlyNativeClosed=true,_owlyNativePending=false,_owlyNativeEnabled=false;
-    unsigned _owlyNativeUsers=0,_owlyNativeTicks=0;
+    unsigned _owlyNativeUsers=0,_owlyNativeDataUsers=0,_owlyNativeTicks=0;
     uint16_t _owlyNativeLastWindow=0;
     bool _owlyNativeHaveWindow=false;
     uint64_t _owlyNativeActionCalls=0,_owlyNativeDataCalls=0,_owlyNativeWindowCalls=0;

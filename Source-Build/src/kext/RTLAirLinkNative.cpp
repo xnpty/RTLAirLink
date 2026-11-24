@@ -73,6 +73,12 @@ struct RTLAirLink::NativeState {
     /* OWLY_NATIVE_IDENTITY_BRIDGE_BEGIN: opaque Apple identity only. */
     struct rtw89_front_native_vif_state airlink = {};
     /* OWLY_NATIVE_IDENTITY_BRIDGE_END */
+    int lastTxEnqueueRc = 0x7fffffff;
+#if defined(OWLY_ABI6_FRONT_BRIDGE) && OWLY_ABI6_FRONT_BRIDGE
+    /* Lock-free 2-slot RX packet pool avoids IOMalloc/IOFree per IPv6 MPDU. */
+    struct owly_abi6_packet rxPool[2] = {};
+    volatile SInt32 rxPoolBusy[2] = {};
+#endif
 };
 
 /* The first bytes of a buffer, for the log. */
@@ -588,22 +594,38 @@ bool RTLAirLink::awdlHandoff(uint32_t kind, const uint8_t *raw, size_t len,
      * RX runs on the rtw89 receive thread, not interrupt top half. */
     bool (*handoff)(void *, const struct owly_abi6_packet *) = nullptr;
     void *ctx = nullptr;
+    struct owly_abi6_packet *rxPool = nullptr;
+    volatile SInt32 *rxPoolBusy = nullptr;
     if (!_owlyRxGateLock) return false;
     IOLockLock(_owlyRxGateLock);
     if (!_halting && !_asleep && _native && _ns &&
         _ns->front.owly_rx_handoff && owly_abi6_gate_enter(&_owlyRxGate)) {
         handoff = _ns->front.owly_rx_handoff;
         ctx = _ns->front.ctx;
+        rxPool = _ns->rxPool;
+        rxPoolBusy = _ns->rxPoolBusy;
     }
     IOLockUnlock(_owlyRxGateLock);
     if (!handoff) return false;
 
     bool ok = false;
     /* Gate B never compiled this branch. In Gate C2, avoid putting a
-     * 1.5KiB packet on the 16KiB kernel RX stack. */
+     * 1.5KiB packet on the 16KiB kernel RX stack; use the pinned 2-slot pool
+     * first to avoid IOMalloc/IOFree per IPv6 MPDU on the hot RX path. */
     if (raw && src && dst && len <= OWLY_ABI6_PACKET_MAX) {
-        struct owly_abi6_packet *packet =
-            static_cast<struct owly_abi6_packet *>(IOMalloc(sizeof(struct owly_abi6_packet)));
+        int slot = -1;
+        struct owly_abi6_packet *packet = nullptr;
+        if (rxPool && rxPoolBusy) {
+            for (int i = 0; i < 2; ++i) {
+                if (__atomic_exchange_n(&rxPoolBusy[i], 1, __ATOMIC_ACQUIRE) == 0) {
+                    slot = i;
+                    packet = &rxPool[i];
+                    break;
+                }
+            }
+        }
+        if (!packet)
+            packet = static_cast<struct owly_abi6_packet *>(IOMalloc(sizeof(struct owly_abi6_packet)));
         if (packet) {
             if (owly_abi6_packet_make(packet, kind, raw, len, src, dst)) {
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
@@ -613,7 +635,10 @@ bool RTLAirLink::awdlHandoff(uint32_t kind, const uint8_t *raw, size_t len,
 #endif
                 ok = handoff(ctx, packet);
             }
-            IOFree(packet, sizeof(struct owly_abi6_packet));
+            if (slot >= 0)
+                __atomic_store_n(&rxPoolBusy[slot], 0, __ATOMIC_RELEASE);
+            else
+                IOFree(packet, sizeof(struct owly_abi6_packet));
         }
     }
 
@@ -643,7 +668,8 @@ uint32_t RTLAirLink::backNativeOutput(void *ctx,mbuf_t m)
         }
     }
     mbuf_freem(m); /* all statuses consume once; bounded queue copies before returning */
-    if(self)self->setProperty("OwlyNativeTXEnqueueResult",static_cast<unsigned long long>(static_cast<uint32_t>(rc)),32);
+    if (self && (!self->_ns || __atomic_exchange_n(&self->_ns->lastTxEnqueueRc, rc, __ATOMIC_RELAXED) != rc))
+        self->setProperty("OwlyNativeTXEnqueueResult",static_cast<unsigned long long>(static_cast<uint32_t>(rc)),32);
     return rc ? kIOReturnOutputDropped : kIOReturnOutputSuccess;
 }
 int RTLAirLink::backNativeWindow(void *ctx,struct owly_link_window *out)
@@ -1584,12 +1610,20 @@ int RTLAirLink::nativeRequest(bool isSet, int number, void *data)
         }
 
         /* RTLAirLink: while an AWDL peer is configured, scans are thinned
-         * like connected ones, so the radio keeps to the peer's windows. A
-         * scan that names a network or channels is still always made. */
+         * like connected ones, so the radio keeps to the peer's windows.
+         * While AWDL data is actively flowing, defer directed scans too so
+         * background reconnect probes cannot yank the radio off ch 149. */
         bool awdlBusy=false;
         const bool awdlProtected=rtw89_glue_awdl_scan_protect(&awdlBusy);
         setProperty("OwlyNativeScanProtected",awdlProtected);
         setProperty("OwlyNativeScanBusy",awdlBusy);
+        if (awdlProtected && awdlBusy) {
+            UInt32 result = 0;
+            setProperty("OwlyNativeScansDeferred", ++_ns->awdlScansDeferred, 64);
+            _ns->scanBootstrapTried = true;
+            nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
+            return kIOReturnSuccess;
+        }
         if ((link.state != RTW89_GLUE_LINK_DOWN || awdlProtected) && !wantSsidLen && !nWantFreqs) {
             /*
              * Connected (or with a real AWDL peer), and nothing in particular asked for: a real scan at

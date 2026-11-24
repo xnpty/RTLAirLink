@@ -421,6 +421,9 @@ static struct owly_radio_lease owly_radio_state;
 static struct wiphy_work owly_radio_work;
 static uint64_t owly_idle_policy_us;
 static uint64_t owly_idle_move_us;
+static uint64_t owly_idle_heard_us;
+static uint64_t owly_idle_data_rx_seen;
+static uint64_t owly_idle_data_rx_us;
 static void owly_radio_maybe_attach(void);
 static void owly_radio_work_run(struct wiphy *wiphy, struct wiphy_work *work);
 static void owly_radio_detach(struct ieee80211_chanctx_conf *primary);
@@ -438,6 +441,8 @@ static struct owly_native_link owly_link_state;
 static spinlock_t owly_link_lock;
 static uint8_t owly_link_txbuf[OWLY_LINK_FRAME_MAX];
 static struct ieee80211_vif *owly_core04c_vif;
+static bool owly_tx_ring_stalled;
+static bool owly_tx_reclaimed;
 static void owly_peer_init(void);
 static void owly_peer_drain_rx(void);
 static void owly_peer_fini(void);
@@ -471,6 +476,22 @@ static struct {
 static unsigned owly_mc_freq(uint8_t ch)
 {
     return ch == 149 ? 5745u : ch == 44 ? 5220u : 2437u;
+}
+static uint8_t owly_mc_channel_width(struct wiphy *wiphy, uint8_t ch)
+{
+    const u32 center = ch == 149 ? 5775u : ch == 44 ? 5210u : 0u;
+    struct ieee80211_supported_band *sband;
+    if (!wiphy || !center)
+        return 20u;
+    sband = wiphy->bands[NL80211_BAND_5GHZ];
+    if (!sband || !sband->vht_cap.vht_supported)
+        return 20u;
+    for (u32 f = center - 30u; f <= center + 30u; f += 20u) {
+        struct ieee80211_channel *sub = ieee80211_get_channel(wiphy, (int)f);
+        if (!sub || (sub->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_RADAR)))
+            return 20u;
+    }
+    return 80u;
 }
 static struct wiphy_delayed_work owly_mc_work;
 static void owly_mc_work_run(struct wiphy *wiphy, struct wiphy_work *work);
@@ -954,10 +975,17 @@ static void glue_napi_post_poll(int done)
 {
     struct rtw89_dev *rtwdev;
 
-    if (!glue.up || !glue.ppdu_flush)
+    if (!glue.up)
+        return;
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (__atomic_exchange_n(&owly_tx_reclaimed, false, __ATOMIC_ACQ_REL) &&
+        __atomic_exchange_n(&owly_tx_ring_stalled, false, __ATOMIC_ACQ_REL))
+        wiphy_work_queue(glue_hw()->wiphy, &owly_sync_work.work);
+#endif
+    if (!glue.ppdu_flush)
         return;
     rtwdev = glue_hw()->priv;
-    if (!skb_queue_empty(&rtwdev->ppdu_sts.rx_queue[RTW89_PHY_0]))
+    if (done < 128 && !skb_queue_empty(&rtwdev->ppdu_sts.rx_queue[RTW89_PHY_0]))
         rtw88_queue_datapath_delayed_work(&glue.ppdu_flush_work, RTW89_GLUE_PPDU_WAIT);
 }
 
@@ -1652,12 +1680,19 @@ static void owly_awdl_deliver_rx(struct sk_buff *skb)
         struct owly_abi6_rx_result result;
         rtw89_mlme_get_status(&st);
 #ifdef OWLY_MC_BUILT
-        /* Visiting ch 6 for multichannel AWDL: judge the frame against the
-         * social channel we are on, not the AP's. */
-        if (owly_mc.enabled && status->freq == owly_mc_freq(owly_mc.channel)) {
-            st.freq = status->freq;
-            st.center_freq = status->freq;
-            st.width = 20;
+        /* Visiting a social channel for multichannel AWDL: judge the frame
+         * against the social channel (and its 80 MHz center on ch 44/149),
+         * not the AP's. When home==true, st already describes the AP channel. */
+        if (owly_mc.enabled && !owly_mc.home) {
+            const u16 mc_freq = (u16)owly_mc_freq(owly_mc.channel);
+            const uint8_t mc_w = owly_mc_channel_width(glue_hw()->wiphy, owly_mc.channel);
+            const u16 mc_center = mc_w == 80u ?
+                (mc_freq == 5745 ? 5775u : mc_freq == 5220 ? 5210u : mc_freq) : mc_freq;
+            if (status->freq == mc_freq || status->freq == mc_center) {
+                st.freq = mc_freq;
+                st.center_freq = mc_center;
+                st.width = mc_w;
+            }
         }
 #endif
         state.rx_freq_mhz = (unsigned int)status->freq;
@@ -1856,12 +1891,19 @@ static void glue_rx(void *ctx, struct ieee80211_sta *sta, struct sk_buff *skb)
         struct owly_abi6_rx_result result;
         rtw89_mlme_get_status(&st);
 #ifdef OWLY_MC_BUILT
-        /* Visiting ch 6 for multichannel AWDL: judge the frame against the
-         * social channel we are on, not the AP's. */
-        if (owly_mc.enabled && status->freq == owly_mc_freq(owly_mc.channel)) {
-            st.freq = status->freq;
-            st.center_freq = status->freq;
-            st.width = 20;
+        /* Visiting a social channel for multichannel AWDL: judge the frame
+         * against the social channel (and its 80 MHz center on ch 44/149),
+         * not the AP's. When home==true, st already describes the AP channel. */
+        if (owly_mc.enabled && !owly_mc.home) {
+            const u16 mc_freq = (u16)owly_mc_freq(owly_mc.channel);
+            const uint8_t mc_w = owly_mc_channel_width(glue_hw()->wiphy, owly_mc.channel);
+            const u16 mc_center = mc_w == 80u ?
+                (mc_freq == 5745 ? 5775u : mc_freq == 5220 ? 5210u : mc_freq) : mc_freq;
+            if (status->freq == mc_freq || status->freq == mc_center) {
+                st.freq = mc_freq;
+                st.center_freq = mc_center;
+                st.width = mc_w;
+            }
         }
 #endif
         state.rx_freq_mhz = (unsigned int)status->freq;
@@ -2043,6 +2085,8 @@ static void glue_tx_status(void *ctx, struct sk_buff *skb)
         const bool local=owly_link_state.active && !memcmp(skb->data+10,owly_link_state.local,6);
         if(local && !multicast && done)++owly_link_state.tx_radio_acked;
         spin_unlock(&owly_link_lock);
+        if(local && !multicast)
+            __atomic_store_n(&owly_tx_reclaimed, true, __ATOMIC_RELEASE);
         if(local) {
             static volatile unsigned long mdns_reports,other_reports;
             /* The TX builder puts IPv6 at offset 40 (Non-QoS) or 42 (QoS). */
@@ -2835,21 +2879,65 @@ static void owly_radio_maybe_attach(void)
     rtw89_mlme_get_status(&idle);
     const uint64_t now=glue_now_us();
     if (idle.awdl_channel_owned && !glue.scanning &&
-        !owly_sync_state.explicitly_disabled &&
-        (!owly_idle_move_us || now<owly_idle_move_us || now-owly_idle_move_us>=5000000u)) {
+        !owly_sync_state.explicitly_disabled) {
+        uint16_t seq, social_slots = 0;
+        uint32_t phase;
+        unsigned peers = 0;
         spin_lock(&owly_link_lock);
-        const uint8_t desired=owly_link_follow_channel(&owly_link_state,glue_now_us());
+        const bool rooted = owly_link_clock(&owly_link_state, now, &seq, &phase,
+                                            &social_slots, &peers);
+        const uint8_t data_ch = owly_link_data_channel(&owly_link_state, now);
+        const uint8_t follow = data_ch ? data_ch :
+                               rooted ? owly_link_follow_channel(&owly_link_state, now) :
+                                        owly_link_peer_channel(&owly_link_state, now);
+        bool busy = owly_link_data_busy(&owly_link_state, now);
+        const uint64_t data_rx = owly_link_state.data_rx_admitted;
         spin_unlock(&owly_link_lock);
-        const unsigned freq=desired==149 ? 5745 : desired==44 ? 5220 : 2437;
-        struct ieee80211_channel *candidate=ieee80211_get_channel(hw->wiphy,freq);
-        if (freq!=idle.freq && candidate &&
-            !(candidate->flags&(IEEE80211_CHAN_DISABLED|IEEE80211_CHAN_NO_IR|IEEE80211_CHAN_RADAR))) {
-            owly_idle_move_us=now;
-            const int rc=rtw89_mlme_awdl_hold_channel((u16)freq);
-            /* A refused move keeps the current channel; it must not latch
-             * AWDL off for the rest of the boot. */
-            if (rc)
-                IOLog("OWLY standalone: channel follow refused rc=%d\n",rc);
+        if (data_rx != owly_idle_data_rx_seen) {
+            owly_idle_data_rx_seen = data_rx;
+            owly_idle_data_rx_us = now;
+        }
+        if (owly_idle_data_rx_us && now >= owly_idle_data_rx_us &&
+            now - owly_idle_data_rx_us < 2000000u)
+            busy = true;
+        const bool heard = rooted || peers;
+        if (heard || !owly_idle_heard_us)
+            owly_idle_heard_us = now;
+        const uint8_t cur_ch = idle.freq == 5745 ? 149 : idle.freq == 5220 ? 44 : 6;
+        uint8_t want_ch = cur_ch;
+        /* Upgrade ch 6 discovery -> 5 GHz (ch 149/44) even as handshake starts,
+         * but never move off a 5 GHz channel while data is actively flowing. */
+        if (follow && follow != cur_ch && (!busy || (cur_ch == 6 && follow != 6)))
+            want_ch = follow;
+        else if (!heard && !busy && cur_ch != 6 &&
+                 now >= owly_idle_heard_us && now - owly_idle_heard_us >= 10000000u)
+            want_ch = 6;
+        const uint64_t min_gap = (cur_ch == 6 && want_ch != 6) ? 1000000u : 5000000u;
+        if (want_ch != cur_ch &&
+            (!owly_idle_move_us || now < owly_idle_move_us || now - owly_idle_move_us >= min_gap)) {
+            const unsigned freq = want_ch == 149 ? 5745 : want_ch == 44 ? 5220 : 2437;
+            struct ieee80211_channel *candidate = ieee80211_get_channel(hw->wiphy, freq);
+            const bool ok = candidate &&
+                !(candidate->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_RADAR)) &&
+                (!(candidate->flags & IEEE80211_CHAN_NO_IR) ||
+                 rtw89_cfg80211_awdl_5g_ok(hw->wiphy, freq));
+            if (ok) {
+                owly_idle_move_us = now;
+                const int rc = rtw89_mlme_awdl_hold_channel((u16)freq);
+                /* A refused move keeps the current channel; it must not latch
+                 * AWDL off for the rest of the boot. */
+                if (rc)
+                    IOLog("OWLY standalone: channel follow refused ch=%u rc=%d\n",
+                          (unsigned)want_ch, rc);
+                else {
+                    owly_idle_heard_us = now;
+                    IOLog("OWLY standalone: ch %u -> ch %u (%s)\n",
+                          (unsigned)cur_ch, (unsigned)want_ch,
+                          data_ch ? "active data peer" :
+                          rooted ? "root's main channel" :
+                          heard ? "peers' main channel" : "nobody heard: discovery");
+                }
+            }
         }
     }
 #endif
@@ -2987,8 +3075,11 @@ static struct ieee80211_channel *owly_sync_bound_channel(void)
         return ieee80211_get_channel(glue_hw()->wiphy,owly_mc_freq(owly_mc.channel));
 #endif
     ch=primary->def.chan;
-    if (!ch || (ch->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_IR |
-                             IEEE80211_CHAN_RADAR))) return NULL;
+    if (!ch || (ch->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_RADAR)))
+        return NULL;
+    if ((ch->flags & IEEE80211_CHAN_NO_IR) &&
+        !rtw89_cfg80211_awdl_5g_ok(glue_hw()->wiphy, ch->center_freq))
+        return NULL;
     if (ch->center_freq!=2437 && ch->center_freq!=5220 && ch->center_freq!=5745)
         return NULL;
     return ch;
@@ -3030,6 +3121,8 @@ static void owly_sync_pause(bool clear)
     owly_link_reconcile(&owly_link_state,false,NULL,0,glue_now_us());
     spin_unlock(&owly_link_lock);
     owly_sync_state.broadcast_mif_submitted=false;
+    __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&owly_tx_reclaimed, false, __ATOMIC_RELAXED);
 #endif
     if (owly_core04c_vif && owly_sync_state.handed_off && local->ops->flush)
         local->ops->flush(hw,owly_core04c_vif,BIT(hw->queues)-1,false);
@@ -3117,6 +3210,11 @@ static void owly_mc_enter(void)
         return;
     const uint64_t start = glue_now_us();
     cfg80211_chandef_create(&def, social, NL80211_CHAN_NO_HT);
+    if (owly_mc_channel_width(hw->wiphy, owly_mc.channel) == 80u) {
+        def.width = NL80211_CHAN_WIDTH_80;
+        def.center_freq1 = owly_mc.channel == 149 ? 5775u : 5210u;
+        def.center_freq2 = 0;
+    }
     const int rc = rtw89_compat_owly_visit(hw->priv, link, &def);
     owly_mc.present = true;
     owly_mc.visits++;
@@ -3526,12 +3624,14 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
                   (unsigned)owly_sync_state.channel,(unsigned)length,rc);
     }
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
-    /* Drain a full burst of ready frames in one pass and ring one PCI
-     * doorbell so RTL8852BE hardware can pack consecutive QoS MPDUs into
-     * a single A-MPDU TXOP. */
-    const unsigned int budget = owly_peer_turbo ? 32u : 4u;
+    /* Drain up to a full 64-MPDU A-MPDU window per pass, kicking the PCI
+     * doorbell halfway so RTL8852BE begins transmitting the first 32 MPDUs
+     * while MPDUs 33..64 are staged. */
+    const unsigned int budget = owly_peer_turbo ? 64u : 4u;
     unsigned int sent = 0;
+    bool ring_stalled = false;
     int doorbell = -1;
+    __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELAXED);
     for(unsigned int i=0;i<budget && owly_sync_state.active;i++) {
         unsigned int offset;
         uint64_t generation;
@@ -3557,8 +3657,18 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
         spin_lock(&owly_link_lock);
         owly_link_tx_result(&owly_link_state,offset,generation,rc);
         spin_unlock(&owly_link_lock);
-        if(rc)break;
+        if(rc) {
+            if (rc == -ENOSPC || rc == -ENOMEM || rc == -EBUSY) {
+                ring_stalled = true;
+                __atomic_store_n(&owly_tx_ring_stalled, true, __ATOMIC_RELEASE);
+            }
+            break;
+        }
         ++sent;
+        if (doorbell >= 0 && sent == 32u) {
+            rtw89_core_tx_kick_off(glue_hw()->priv, doorbell);
+            doorbell = -1;
+        }
     }
     if (doorbell >= 0)
         rtw89_core_tx_kick_off(glue_hw()->priv, doorbell);
@@ -3572,8 +3682,14 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
             owly_sync_state.due_us,owly_sync_state.mif_due_us,
             queued,owly_sync_state.pending_mi.length!=0,
             owly_sync_state.hold_for_peer,owly_sync_state.peer_clock.until_next_tu);
-        if (owly_peer_turbo && queued && sent)
-            poll_delay = sent >= budget ? 0u : 250u;
+        if (owly_peer_turbo && queued) {
+            if (sent >= budget)
+                poll_delay = 0u;
+            else if (ring_stalled)
+                poll_delay = 1000u; /* RPQ reclaim wakes immediately via glue_napi_post_poll */
+            else if (sent)
+                poll_delay = 250u;
+        }
 #else
         const unsigned poll_delay=16384;
 #endif
@@ -4114,7 +4230,12 @@ static int glue_up_locked(void)
         local->ops->stop(hw, false);
         goto err_unlock;
     }
-    owly_idle_move_us=owly_idle_policy_us=0;
+    owly_idle_move_us=owly_idle_policy_us=owly_idle_heard_us=0;
+    owly_idle_data_rx_seen=owly_idle_data_rx_us=0;
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&owly_tx_reclaimed, false, __ATOMIC_RELAXED);
+#endif
 #endif
     /* OWLY_PHASE_P_OTHER_BSS_BEGIN
      * EXPERIMENTAL: explicitly request mac80211 to relax Address-1 matching.
