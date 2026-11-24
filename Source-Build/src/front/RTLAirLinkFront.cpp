@@ -1539,6 +1539,18 @@ SInt32 RTLAirLinkFront::apple80211VirtualRequest(UInt type, int number,
             const SInt32 rc=there && _back.request ?
                 _back.request(_back.ctx,type,number,vif,data) : kIOReturnNotReady;
             backLeave();
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+            /* The backend accepted a unicast MI for transmission. Real Broadcom
+             * firmware answers every such frame with an action-frame TX status
+             * (reportDataPathEvents 0x45). Legacy4C blocks RemoteCamera/RTG
+             * traffic registration for 3 s waiting for it, then fails with EIO.
+             * Layout: u32 version, u8 destination[6] (see MasterIndicationRequest). */
+            if (!rc && type==SIOCSA80211 && number==APPLE80211_IOC_AWDL_OOB_REQUEST) {
+                uint8_t destination[6];
+                memcpy(destination,static_cast<const uint8_t *>(data)+4,sizeof(destination));
+                if (!(destination[0]&1)) owlyNativeNoteUMI(destination);
+            }
+#endif
             if (owly_cfg_known(static_cast<unsigned>(number))) {
                 setProperty("OwlyNativeConfigLastRequest",static_cast<unsigned long long>(number),32);
                 setProperty("OwlyNativeConfigLastType",type==SIOCSA80211 ? 1ULL : 0ULL,32);

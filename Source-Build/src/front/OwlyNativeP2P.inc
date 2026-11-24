@@ -168,6 +168,19 @@ void RTLAirLinkFront::owlyNativeCapture(IO80211VirtualInterface *vif,IO80211Peer
     OSSafeReleaseNULL(oldPeer);OSSafeReleaseNULL(oldVif);
     owlyNativeSchedule(1000);
 }
+void RTLAirLinkFront::owlyNativeNoteUMI(const uint8_t mac[6])
+{
+    /* Called from inside Apple's SET149 gate: only queue. The status event is
+     * delivered from the native thread_call so it never re-enters the gate. */
+    IOLockLock(_owlyVifLock);
+    ++_owlyUmiNoted;
+    if(!_owlyNativeClosed && _owlyUmiCount<8) {
+        memcpy(_owlyUmiMac[(_owlyUmiHead+_owlyUmiCount)%8],mac,6);
+        ++_owlyUmiCount;
+    } else ++_owlyUmiDropped;
+    IOLockUnlock(_owlyVifLock);
+    owlyNativeSchedule(1000);
+}
 bool RTLAirLinkFront::owlyNativeAcquire(IO80211VirtualInterface **vif,OSObject **peer)
 {
     *vif=nullptr;*peer=nullptr;
@@ -232,6 +245,7 @@ void RTLAirLinkFront::owlyNativeStop()
     __atomic_store_n(&_owlyNativeEnabled,false,__ATOMIC_RELEASE);
     _owlyNativeEnableIssued=false;_owlyNativeProgrammedChannel=0;
     _owlyNativeProgrammedGeneration=0;
+    _owlyUmiHead=0;_owlyUmiCount=0;
     IOLockUnlock(_owlyVifLock);
     OSSafeReleaseNULL(peer);OSSafeReleaseNULL(vif);
     if(releasePending)release();
@@ -288,6 +302,31 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
                 self->release();return;
             }
             const bool layoutReady=gateStatus==kIOReturnSuccess && gate.valid;
+            for(;;) {
+                /* Deliver owed unicast-MI TX statuses (event 0x45, acked). The
+                 * payload is zeroed: byte 6 == 0 means "acked" to Legacy4C. */
+                uint8_t mac[6]={};bool have=false;
+                IOLockLock(self->_owlyVifLock);
+                if(self->_owlyUmiCount) {
+                    memcpy(mac,self->_owlyUmiMac[self->_owlyUmiHead],6);
+                    self->_owlyUmiHead=(self->_owlyUmiHead+1)%8;--self->_owlyUmiCount;have=true;
+                }
+                IOLockUnlock(self->_owlyVifLock);
+                if(!have)break;
+                struct UmiCall {OSObject *peer;uint8_t status[64];} umi={peer,{}};
+                memcpy(umi.status,mac,6);
+                IOReturn umiStatus=self->_workLoop->runAction(
+                    [](OSObject *,void *opaque,void *,void *,void *) -> IOReturn {
+                        auto *c=static_cast<UmiCall *>(opaque);
+                        owly_peer_window(c->peer,0x45,c->status,sizeof(c->status));
+                        return kIOReturnSuccess;
+                    },self,&umi);
+                if(umiStatus==kIOReturnSuccess)++self->_owlyUmiReported;
+                else ++self->_owlyUmiDropped;
+                self->setProperty("OwlyNativeUMINoted",self->_owlyUmiNoted,64);
+                self->setProperty("OwlyNativeUMIStatusReported",self->_owlyUmiReported,64);
+                self->setProperty("OwlyNativeUMIStatusDropped",self->_owlyUmiDropped,64);
+            }
             const bool publishGate=self->_owlyNativeTicks<4 || !(self->_owlyNativeTicks%64) ||
                 !layoutReady || !owly_native_peer_rx_open(&gate.value);
             if(publishGate)self->setProperty("OwlyNativePeerLayoutReady",layoutReady);

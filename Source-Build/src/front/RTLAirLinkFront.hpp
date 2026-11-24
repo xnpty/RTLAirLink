@@ -137,6 +137,11 @@ private:
     uint64_t _owlyNativeActionAllocFailures=0;
     uint64_t _owlyNativeNextPeerAdmissionUS=0,_owlyNativePeerAddAttempts=0;
     uint64_t _owlyNativePeerAddVerified=0,_owlyNativePeerAddFailed=0,_owlyNativePeerResubmissions=0;
+    /* Unicast MI (SET149) completions owed to IO80211AWDLPeerManager. */
+    void owlyNativeNoteUMI(const uint8_t mac[6]);
+    uint8_t _owlyUmiMac[8][6]={};
+    unsigned _owlyUmiHead=0,_owlyUmiCount=0;
+    uint64_t _owlyUmiNoted=0,_owlyUmiReported=0,_owlyUmiDropped=0;
 #endif
 #if defined(RTW89_AWDL_NATIVE_FRONT_OBSERVE) && RTW89_AWDL_NATIVE_FRONT_OBSERVE
     bool owlyVifEvent(IO80211VirtualInterface *vif, UInt role, uint32_t event,

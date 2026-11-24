@@ -156,16 +156,23 @@ static u32 rtw89_pci_rxbd_recalc(struct rtw89_dev *rtwdev,
 	return cnt;
 }
 
-static void rtw89_pci_sync_skb_for_cpu(struct rtw89_dev *rtwdev,
-				       struct sk_buff *skb)
+static void rtw89_pci_sync_skb_for_cpu_len(struct rtw89_dev *rtwdev,
+					   struct sk_buff *skb, size_t len)
 {
 	struct rtw89_pci_rx_info *rx_info;
 	dma_addr_t dma;
 
 	rx_info = RTW89_PCI_RX_SKB_CB(skb);
 	dma = rx_info->dma;
-	dma_sync_single_for_cpu(rtwdev->dev, dma, RTW89_PCI_RX_BUF_SIZE,
-				DMA_FROM_DEVICE);
+	if (len > RTW89_PCI_RX_BUF_SIZE)
+		len = RTW89_PCI_RX_BUF_SIZE;
+	dma_sync_single_for_cpu(rtwdev->dev, dma, len, DMA_FROM_DEVICE);
+}
+
+static void rtw89_pci_sync_skb_for_cpu(struct rtw89_dev *rtwdev,
+				       struct sk_buff *skb)
+{
+	rtw89_pci_sync_skb_for_cpu_len(rtwdev, skb, RTW89_PCI_RX_BUF_SIZE);
 }
 
 static void rtw89_pci_sync_skb_for_device(struct rtw89_dev *rtwdev,
@@ -232,13 +239,22 @@ int rtw89_pci_sync_skb_for_device_and_validate_rx_info(struct rtw89_dev *rtwdev,
 	int ret;
 
 	do {
-		rtw89_pci_sync_skb_for_cpu(rtwdev, skb);
+		rtw89_pci_sync_skb_for_cpu_len(rtwdev, skb,
+					       sizeof(struct rtw89_pci_rxbd_info));
 		rtw89_pci_rxbd_info_update(rtwdev, skb);
 
 		ret = rtw89_pci_validate_rx_tag(rtwdev, rx_ring, skb);
 		if (ret != -EAGAIN)
 			break;
 	} while (rx_tag_retry--);
+
+	if (!ret) {
+		size_t sync_len = rx_info->len;
+
+		if (sync_len < sizeof(struct rtw89_pci_rxbd_info) + 40)
+			sync_len = sizeof(struct rtw89_pci_rxbd_info) + 40;
+		rtw89_pci_sync_skb_for_cpu_len(rtwdev, skb, sync_len);
+	}
 
 	/* update target rx_tag for next RX */
 	rx_ring->target_rx_tag = rx_info->tag + 1;
@@ -374,6 +390,9 @@ static u32 rtw89_pci_rxbd_deliver_skbs(struct rtw89_dev *rtwdev,
 
 		/* first segment has RX desc */
 		offset = desc_info->offset + desc_info->rxd_len;
+		if (ls && offset + desc_info->pkt_size > rx_info->len)
+			rtw89_pci_sync_skb_for_cpu_len(rtwdev, skb,
+						       offset + desc_info->pkt_size);
 	} else {
 		offset = sizeof(struct rtw89_pci_rxbd_info);
 		if (!new) {
@@ -4277,9 +4296,9 @@ static void rtw89_pci_recalc_int_mit(struct rtw89_dev *rtwdev)
 		val = B_BE_PCIE_MIT_RX0P2_EN | B_BE_PCIE_MIT_RX0P1_EN;
 	else
 		val = B_AX_RXMIT_RXP2_SEL | B_AX_RXMIT_RXP1_SEL |
-		      FIELD_PREP(B_AX_RXCOUNTER_MATCH_MASK, RTW89_PCI_RXBD_NUM_MAX / 2) |
+		      FIELD_PREP(B_AX_RXCOUNTER_MATCH_MASK, 32) |
 		      FIELD_PREP(B_AX_RXTIMER_UNIT_MASK, AX_RXTIMER_UNIT_64US) |
-		      FIELD_PREP(B_AX_RXTIMER_MATCH_MASK, 2048 / 64);
+		      FIELD_PREP(B_AX_RXTIMER_MATCH_MASK, 512 / 64);
 
 out:
 	rtw89_write32(rtwdev, info->mit_addr, val);

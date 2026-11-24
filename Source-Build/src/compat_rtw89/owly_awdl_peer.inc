@@ -9,8 +9,8 @@
 #define OWLY_TX_BA_WAIT 1u
 #define OWLY_TX_BA_OPERATIONAL 2u
 #define OWLY_TX_BA_DECLINED 3u
-#define OWLY_TX_BA_TIMEOUT_US 1000000ull
-#define OWLY_TX_BA_MAX_TRIES 3u
+#define OWLY_TX_BA_TIMEOUT_US 200000ull
+#define OWLY_TX_BA_MAX_TRIES 6u
 struct owly_peer_caps {
  uint16_t ht_rx_mcs, ht_cap_info;
  uint8_t ht_ampdu_params, max_channel_width;
@@ -208,8 +208,12 @@ static void owly_peer_note_unicast_tx(const uint8_t destination[6])
   return;
  const uint64_t now = glue_now_us();
  if (p->tx_ba_state == OWLY_TX_BA_OPERATIONAL && p->tx_last_unicast_us &&
-     now > p->tx_last_unicast_us && now - p->tx_last_unicast_us > 2000000ull) {
+     now > p->tx_last_unicast_us && now - p->tx_last_unicast_us > 10000000ull) {
   owly_peer_tx_ba_stop(p, false);
+  p->tx_ba_attempts = 0;
+ } else if (p->tx_ba_state == OWLY_TX_BA_DECLINED && p->tx_ba_sent_us &&
+            now > p->tx_ba_sent_us && now - p->tx_ba_sent_us > 5000000ull) {
+  p->tx_ba_state = OWLY_TX_BA_NONE;
   p->tx_ba_attempts = 0;
  }
  p->tx_last_unicast_us = now;
@@ -519,7 +523,10 @@ static bool owly_peer_data_rx(struct sk_buff *skb)
  struct owly_peer_packet_queues q;owly_peer_queues_init(&q);bool consumed=false;spin_lock(&owly_peer_lock);
  struct owly_awdl_radio_peer *p=owly_peer_find(raw+10);const unsigned tid=raw[24]&15u;
  if(p && !memcmp(raw+4,p->own,6) && (p->ba_map&(1u<<tid))){
-  owly_ba_push(&p->reorder[tid],owly_ba_le16(raw+22)>>4,skb,glue_now_us(),owly_peer_good,owly_peer_bad,&q);consumed=true;}
+  const uint64_t now=glue_now_us();
+  owly_ba_push(&p->reorder[tid],owly_ba_le16(raw+22)>>4,skb,now,owly_peer_good,owly_peer_bad,&q);
+  owly_ba_timeout(&p->reorder[tid],now,owly_peer_good,&q);
+  consumed=true;}
  spin_unlock(&owly_peer_lock);owly_peer_queues_finish(&q);return consumed;
 }
 static bool owly_peer_bar_rx(struct sk_buff *skb)

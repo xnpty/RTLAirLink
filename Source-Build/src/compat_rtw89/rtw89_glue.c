@@ -265,7 +265,7 @@ struct rtw89_glue_dma {
     void *cookie;
 };
 
-#define RTW89_GLUE_DMA_BUCKETS 256
+#define RTW89_GLUE_DMA_BUCKETS 512
 #define RTW89_GLUE_MAX_BSS 128
 #define RTW89_GLUE_MAX_IES 1024
 #define GLUE_SCAN_SLICE 8               /* channels per scan while connected */
@@ -739,9 +739,12 @@ static void glue_dma_sync_for_cpu(struct device *dev, dma_addr_t addr,
 static void glue_dma_sync_for_device(struct device *dev, dma_addr_t addr,
                                      size_t size, int dir)
 {
-    struct rtw89_glue_dma *d = glue_dma_find(addr, false);
+    struct rtw89_glue_dma *d;
 
-    if (d && d->orig && dir != DMA_FROM_DEVICE)
+    if (dir == DMA_FROM_DEVICE)
+        return;
+    d = glue_dma_find(addr, false);
+    if (d && d->orig)
         memcpy(d->virt, d->orig, min(size, d->size));
 }
 
