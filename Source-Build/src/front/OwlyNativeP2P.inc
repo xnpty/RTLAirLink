@@ -667,7 +667,7 @@ UInt32 RTLAirLinkFront::owlyNativeOutput(IO80211VirtualInterface *vif,mbuf_t m)
     /* Bounded framing evidence, before ownership transfers to the backend.
      * Only the L2/SNAP/AWDL header is sampled, no IP or application payload. */
     const uint64_t sample=__atomic_add_fetch(&_owlyNativeTXSamples,1u,__ATOMIC_RELAXED);
-    if(sample<=4 || !(sample%64)) {
+    if(sample<=4 || !(sample&(sample-1u))) {
         uint8_t header[30]={};const size_t length=mbuf_pkthdr_len(m);
         const size_t copied=length<sizeof(header) ? length : sizeof(header);
         setProperty("OwlyNativeTXInputLength",static_cast<unsigned long long>(length),64);

@@ -155,7 +155,7 @@ static const struct {int (*sta_state)(struct ieee80211_hw *,struct ieee80211_vif
 struct rtw89_m80211_local {__typeof__(&ops) ops;};static struct rtw89_m80211_local local={&ops};
 static struct rtw89_m80211_local *hw_to_local(struct ieee80211_hw *h){assert(h==&hardware);return &local;}
 static int rtw89_fw_h2c_ba_cam(struct rtw89_dev *d,struct rtw89_vif_link *v,struct rtw89_sta_link *sl,bool start,struct ieee80211_ampdu_params *a)
-{assert(d==&device && v==sl->rtwvif_link && !rx_context && a->tid<16 && !a->amsdu);
+{assert(d==&device && v==sl->rtwvif_link && !rx_context && a->tid<16);
  struct rtw89_sta *s=&a->sta->private;struct rtw89_ba_cam_entry *e=&s->entries[a->tid];
  if(start){++fw_starts;if(!no_entry){e->tid=a->tid;list_add_tail(&e->list,&sl->ba_cam_list);}
   if(leave_window_during_h2c){current+=20000;window_open=false;}return fw_result;}

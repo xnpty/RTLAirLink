@@ -348,10 +348,68 @@ static void ht_receive_rates(void)
     CHECK(!memcmp(wire+26,snap_copy,16) && wlen==eth_len-14+42);
 }
 
+static void tx_amsdu_batch(void)
+{
+    uint8_t amsdu[OWLY_LINK_AMSDU_MAX];
+    size_t out=0;
+    unsigned offset=0, count=0;
+    uint64_t gen=0;
+    bool is_qos=false, is_amsdu=false;
+    start();
+    size_t act=action(1000000,NULL);
+    CHECK(owly_link_observe(&link_state,raw,act,149,-42,1000000));
+    CHECK(owly_link_observe(&link_state,raw,act,149,-42,1000100));
+    /* Enqueue 4 unicast IPv6 frames of distinct non-aligned lengths. */
+    size_t elen=ethernet(false);
+    for(unsigned k=0;k<4;k++) {
+        eth[14+40+k]=(uint8_t)(0x40+k);
+        CHECK(!owly_link_enqueue(&link_state,eth,elen,1000200+k));
+    }
+    struct owly_link_tx_qos_peer qp={.qos_sn=0x234,.max_amsdu=4900u,.max_subframes=3u,.valid=true};
+    memcpy(qp.mac,remote,6);
+    CHECK(owly_link_next_tx_batch(&link_state,1000300,true,&qp,1,
+                                  amsdu,sizeof(amsdu),&out,&offset,&gen,
+                                  &count,&is_qos,&is_amsdu)==1);
+    CHECK(count==3 && is_qos && is_amsdu && offset==0);
+    CHECK(amsdu[0]==0x88 && amsdu[22]==0x40 && amsdu[23]==0x23 && amsdu[24]==0x80 && amsdu[25]==0x00);
+    /* Walk and validate all 3 A-MSDU subframes and 4-byte zero padding. */
+    size_t pos=26u;
+    for(unsigned k=0;k<3;k++) {
+        CHECK(pos+14u<=out);
+        CHECK(!memcmp(amsdu+pos,remote,6) && !memcmp(amsdu+pos+6,local,6));
+        const size_t mlen=((size_t)amsdu[pos+12]<<8)|amsdu[pos+13];
+        CHECK(mlen==elen-14u+16u && pos+14u+mlen<=out);
+        CHECK(amsdu[pos+14+8]==3 && amsdu[pos+14+9]==4);
+        CHECK((uint16_t)(amsdu[pos+14+10]|((uint16_t)amsdu[pos+14+11]<<8))==(uint16_t)(link_state.awdl_sequence+k));
+        pos+=14u+mlen;
+        if(k<2) {
+            const size_t pad=(4u-((14u+mlen)&3u))&3u;
+            for(size_t p=0;p<pad;++p) CHECK(amsdu[pos+p]==0);
+            pos+=pad;
+        }
+    }
+    CHECK(pos==out);
+    /* Transient ring-full keeps all 3 queued frames untouched. */
+    owly_link_tx_result_batch(&link_state,offset,gen,count,-ENOSPC);
+    CHECK(link_state.count==4 && link_state.tx_handoffs==0);
+    /* Commit removes all 3 and advances awdl_sequence by 3. */
+    owly_link_tx_result_batch(&link_state,offset,gen,count,0);
+    CHECK(link_state.count==1 && link_state.tx_handoffs==3 && link_state.awdl_sequence==3);
+    /* Remaining single frame emits as single-MSDU QoS Data (no A-MSDU bit). */
+    qp.qos_sn=0x235;
+    CHECK(owly_link_next_tx_batch(&link_state,1000310,true,&qp,1,
+                                  amsdu,sizeof(amsdu),&out,&offset,&gen,
+                                  &count,&is_qos,&is_amsdu)==1);
+    CHECK(count==1 && is_qos && !is_amsdu && amsdu[0]==0x88 && amsdu[24]==0x00 && amsdu[25]==0x00);
+    CHECK(amsdu[22]==0x50 && amsdu[23]==0x23 && out==elen-14u+42u);
+    owly_link_tx_result_batch(&link_state,offset,gen,count,0);
+    CHECK(link_state.count==0 && link_state.tx_handoffs==4 && link_state.awdl_sequence==4);
+}
+
 int main(int argc,char **argv)
 {
     if (argc==2 && !strcmp(argv[1],"header")) observed_header00();
-    else {ht_receive_rates();codec();qos_length_envelope();peers();queue();scan_activity_lifetime();control_reply_slot();malformed();native_controls();observed_header00();}
+    else {ht_receive_rates();tx_amsdu_batch();codec();qos_length_envelope();peers();queue();scan_activity_lifetime();control_reply_slot();malformed();native_controls();observed_header00();}
     printf("native link production: %u checks passed; no RF proof\n",checks);
     return 0;
 }

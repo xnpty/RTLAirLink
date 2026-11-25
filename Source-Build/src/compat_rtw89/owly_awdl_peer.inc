@@ -31,8 +31,8 @@ struct owly_awdl_radio_peer {
  uint32_t applied_vht_cap;
  /* TX BlockAck (TID 0) state machine. */
  uint8_t tx_ba_state, tx_ba_token, tx_ba_attempts;
- uint16_t tx_ba_buf_size, tx_qos_sn;
- bool tx_ba_needed;
+ uint16_t tx_ba_buf_size, tx_qos_sn, tx_ba_amsdu_max;
+ bool tx_ba_needed, tx_ba_amsdu;
  uint64_t tx_ba_sent_us, tx_last_unicast_us;
 };
 struct owly_awdl_control {uint8_t bytes[64];size_t length;uint64_t received,generation;};
@@ -46,9 +46,10 @@ static uint8_t owly_tx_ba_dialog;
 static bool owly_peer_fault,owly_peer_accepting;
 static bool owly_peer_use_action_rssi = true;
 static bool owly_peer_turbo = true;
+static unsigned int owly_amsdu_verified, owly_amsdu_init_fails, owly_amsdu_fallback;
 static struct work_struct owly_peer_delivery_work;
 static struct delayed_work owly_peer_reorder_work;
-#define OWLY_PEER_READY_SIZE 1024u
+#define OWLY_PEER_READY_SIZE 2048u
 static struct {struct sk_buff *skb;uint64_t generation;} owly_peer_ready[OWLY_PEER_READY_SIZE];
 static unsigned owly_peer_ready_head,owly_peer_ready_count;
 static uint64_t owly_peer_ready_drops;
@@ -62,6 +63,9 @@ static void owly_peer_init(void)
  spin_lock_init(&owly_peer_lock);memset(owly_radio_peers,0,sizeof(owly_radio_peers));
  owly_control_head=owly_control_count=0;owly_peer_generation=owly_peer_check_us=0;
  owly_peer_fault=owly_peer_accepting=false;owly_control_sequence=0;owly_tx_ba_dialog=0;
+ __atomic_store_n(&owly_amsdu_verified,0u,__ATOMIC_RELAXED);
+ __atomic_store_n(&owly_amsdu_init_fails,0u,__ATOMIC_RELAXED);
+ __atomic_store_n(&owly_amsdu_fallback,0u,__ATOMIC_RELAXED);
  owly_peer_ready_head=owly_peer_ready_count=0;owly_peer_ready_drops=0;
  INIT_WORK(&owly_peer_delivery_work,owly_peer_delivery_run);
  INIT_DELAYED_WORK(&owly_peer_reorder_work,owly_peer_reorder_run);
@@ -117,11 +121,11 @@ static void owly_peer_delivery_run(struct work_struct *work)
 {
  (void)work;
  /* Ordinary RX work: Apple's input may call back into cmd/wiphy. */
- struct {struct sk_buff *skb;bool deliver;} batch[64];
+ struct {struct sk_buff *skb;bool deliver;} batch[128];
  for(;;){
   unsigned n=0;
   spin_lock(&owly_peer_lock);
-  while(n<64u && owly_peer_ready_count){
+  while(n<128u && owly_peer_ready_count){
    const unsigned at=owly_peer_ready_head;
    batch[n].skb=owly_peer_ready[at].skb;
    batch[n].deliver=glue.up && owly_peer_accepting && owly_peer_ready[at].generation==owly_peer_generation;
@@ -223,6 +227,8 @@ static void owly_peer_tx_ba_stop(struct owly_awdl_radio_peer *p, bool destroy)
  }
  p->tx_ba_state = OWLY_TX_BA_NONE;
  p->tx_ba_buf_size = 0;
+ p->tx_ba_amsdu = false;
+ p->tx_ba_amsdu_max = 0;
 }
 static void owly_peer_note_unicast_tx(const uint8_t destination[6])
 {
@@ -242,25 +248,65 @@ static void owly_peer_note_unicast_tx(const uint8_t destination[6])
  p->tx_last_unicast_us = now;
  p->tx_ba_needed = true;
 }
-static bool owly_peer_tx_ampdu_peek(const uint8_t destination[6], uint16_t *qos_sn)
+static unsigned owly_peer_fill_tx_qos(struct owly_link_tx_qos_peer out[OWLY_RADIO_PEERS])
+{
+ unsigned n = 0;
+ if (!owly_peer_turbo)
+  return 0;
+ const bool allow_amsdu = !__atomic_load_n(&owly_amsdu_fallback, __ATOMIC_ACQUIRE);
+ for (unsigned i = 0; i < OWLY_RADIO_PEERS; ++i) {
+  const struct owly_awdl_radio_peer *p = &owly_radio_peers[i];
+  if (!p->sta || p->blocked || p->state < IEEE80211_STA_ASSOC ||
+      p->tx_ba_state != OWLY_TX_BA_OPERATIONAL)
+   continue;
+  memcpy(out[n].mac, p->mac, 6);
+  out[n].qos_sn = p->tx_qos_sn;
+  out[n].max_amsdu = (allow_amsdu && p->tx_ba_amsdu) ? p->tx_ba_amsdu_max : 0u;
+  out[n].max_subframes = out[n].max_amsdu ?
+      (out[n].max_amsdu >= 4600u ? OWLY_LINK_AMSDU_SUBFRAMES : 2u) : 1u;
+  out[n].valid = true;
+  ++n;
+ }
+ return n;
+}
+static void owly_peer_commit_tx_qos(const uint8_t destination[6],
+                                    struct owly_link_tx_qos_peer *qos_peers,
+                                    unsigned n_qos_peers, uint64_t now)
 {
  struct owly_awdl_radio_peer *p = owly_peer_find(destination);
- if (!owly_peer_turbo || !p || p->blocked || p->state < IEEE80211_STA_ASSOC ||
-     p->tx_ba_state != OWLY_TX_BA_OPERATIONAL)
-  return false;
- if (qos_sn) *qos_sn = p->tx_qos_sn;
- return true;
+ if (p) {
+  p->tx_qos_sn = (uint16_t)((p->tx_qos_sn + 1u) & 4095u);
+  p->tx_last_unicast_us = now;
+  for (unsigned i = 0; i < n_qos_peers; ++i) {
+   if (qos_peers[i].valid && !memcmp(qos_peers[i].mac, destination, 6)) {
+    qos_peers[i].qos_sn = p->tx_qos_sn;
+    if (__atomic_load_n(&owly_amsdu_fallback, __ATOMIC_ACQUIRE)) {
+     qos_peers[i].max_amsdu = 0u;
+     qos_peers[i].max_subframes = 1u;
+    }
+    break;
+   }
+  }
+ }
 }
-static void owly_peer_tx_ampdu_commit(const uint8_t destination[6])
+static void owly_peer_tx_amsdu_note(bool acked)
 {
- struct owly_awdl_radio_peer *p = owly_peer_find(destination);
- if (p) p->tx_qos_sn = (uint16_t)((p->tx_qos_sn + 1u) & 4095u);
+ if (__atomic_load_n(&owly_amsdu_verified, __ATOMIC_ACQUIRE))
+  return;
+ if (acked) {
+  __atomic_store_n(&owly_amsdu_verified, 1u, __ATOMIC_RELEASE);
+  return;
+ }
+ if (__atomic_add_fetch(&owly_amsdu_init_fails, 1u, __ATOMIC_ACQ_REL) == 6u) {
+  __atomic_store_n(&owly_amsdu_fallback, 1u, __ATOMIC_RELEASE);
+  IOLog("RTLAirLink AWDL TX A-MSDU: initial A-MSDUs not ACKed; falling back to single-MSDU\n");
+ }
 }
-static int owly_peer_ba_firmware(struct owly_awdl_radio_peer *p,unsigned tid,bool start,uint16_t ssn,uint16_t window)
+static int owly_peer_ba_firmware(struct owly_awdl_radio_peer *p,unsigned tid,bool start,uint16_t ssn,uint16_t window,bool amsdu)
 {
  struct rtw89_sta *rs=sta_to_rtwsta(p->sta);struct rtw89_sta_link *sl=rs->links[p->sta->deflink.link_id];
  struct rtw89_dev *dev=glue_hw()->priv;
- struct ieee80211_ampdu_params a={.sta=p->sta,.tid=(u16)tid,.ssn=ssn,.buf_size=window,.amsdu=false};
+ struct ieee80211_ampdu_params a={.sta=p->sta,.tid=(u16)tid,.ssn=ssn,.buf_size=window,.amsdu=amsdu};
  struct rtw89_ba_cam_entry *entry;bool found=false;int rc;lockdep_assert_wiphy(glue_hw()->wiphy);
  if(!sl || tid>=16 || dev->chip->chip_id!=RTL8852B)return -EOPNOTSUPP;
  /* Preserve H2C errors. Upstream intentionally returns success when static
@@ -281,7 +327,7 @@ static void owly_peer_drop(struct owly_awdl_radio_peer *p)
  const uint16_t active=p->ba_map;p->ba_map=0;
  for(unsigned t=0;t<16;t++)owly_ba_clear(&p->reorder[t],owly_peer_bad,&q);
  spin_unlock(&owly_peer_lock);owly_peer_queues_finish(&q);
- for(unsigned t=0;t<16;t++)if(active&(1u<<t))if(owly_peer_ba_firmware(p,t,false,0,0))owly_peer_fault=true;
+ for(unsigned t=0;t<16;t++)if(active&(1u<<t))if(owly_peer_ba_firmware(p,t,false,0,0,false))owly_peer_fault=true;
  owly_peer_tx_ba_stop(p, true);
  rtw89_m80211_sta_purge_txqs(p->sta);
  if(local->ops->flush)local->ops->flush(hw,owly_core04c_vif,BIT(hw->queues)-1,false);
@@ -363,6 +409,9 @@ static void owly_peer_apply_rates(struct owly_awdl_radio_peer *p,
                                      local_tx_nss);
   if (vht_rx_map != 0xffffu) {
    const u32 local_vcap = band->vht_cap.cap;
+   const u32 peer_mpdu = caps->vht_cap_info & 3u;
+   const u32 local_mpdu = local_vcap & 3u;
+   vht_cap |= peer_mpdu < local_mpdu ? peer_mpdu : local_mpdu;
    if ((caps->vht_cap_info & IEEE80211_VHT_CAP_RXLDPC) && (local_vcap & IEEE80211_VHT_CAP_RXLDPC))
     vht_cap |= IEEE80211_VHT_CAP_RXLDPC;
    if ((caps->vht_cap_info & IEEE80211_VHT_CAP_SHORT_GI_80) && (local_vcap & IEEE80211_VHT_CAP_SHORT_GI_80))
@@ -398,6 +447,8 @@ static void owly_peer_apply_rates(struct owly_awdl_radio_peer *p,
   ht_cap |= IEEE80211_HT_CAP_SGI_40;
  if ((caps->ht_cap_info & IEEE80211_HT_CAP_RX_STBC) && (local_hcap & IEEE80211_HT_CAP_TX_STBC))
   ht_cap |= (caps->ht_cap_info & IEEE80211_HT_CAP_RX_STBC);
+ if ((caps->ht_cap_info & 0x0800u) && (local_hcap & 0x0800u))
+  ht_cap |= 0x0800u; /* IEEE80211_HT_CAP_MAX_AMSDU */
 
  sta->deflink.ht_cap.ht_supported = mcs0 != 0;
  sta->deflink.ht_cap.cap = ht_cap;
@@ -703,11 +754,11 @@ static void owly_peer_tick(struct ieee80211_channel *ch)
      status = 0;
     } else {
      if (active)
-      rc = owly_peer_ba_firmware(p, tid, false, 0, 0);
+      rc = owly_peer_ba_firmware(p, tid, false, 0, 0, false);
      /* A BA CAM keyed to a different MAC ID cannot acknowledge this RX
       * stream. Decline ADDBA so the peer can continue with ordinary ACKs. */
      if (!rc && matching_cam) {
-      rc = owly_peer_ba_firmware(p, tid, true, r.ssn, r.window);
+      rc = owly_peer_ba_firmware(p, tid, true, r.ssn, r.window, (r.capability & 1u) != 0);
       if (!rc) {
        spin_lock(&owly_peer_lock);
        owly_ba_start(&p->reorder[tid], r.ssn, r.window);
@@ -726,9 +777,9 @@ static void owly_peer_tick(struct ieee80211_channel *ch)
     }
     if(!owly_peer_reply_due(&c))break; /* H2C may cross the end of a shared AW. */
     owly_ba_response(c.bytes,own,&r,status,owly_control_sequence++,response);const int tx=owly_sync_submit(ch,response,33,false);
-    IOLog("OWLY AWDL BlockAck: tid=%u token=%u ssn=%u window=%u status=%u firmware=%d tx=%d "
+    IOLog("OWLY AWDL BlockAck: tid=%u token=%u ssn=%u window=%u amsdu=%u status=%u firmware=%d tx=%d "
           "rx_mac_id=%d sta_mac_id=%d delay_us=%llu\n",
-     (unsigned)r.tid,(unsigned)r.token,(unsigned)r.ssn,(unsigned)r.window,(unsigned)status,rc,tx,
+     (unsigned)r.tid,(unsigned)r.token,(unsigned)r.ssn,(unsigned)r.window,(unsigned)(r.capability&1u),(unsigned)status,rc,tx,
      rx_mac_id,sta_mac_id,
      (unsigned long long)(glue_now_us()-c.received));
     if(tx==-ENOMEM || tx==-ENOSPC || tx==-EBUSY)break;
@@ -738,19 +789,31 @@ static void owly_peer_tick(struct ieee80211_channel *ch)
       struct ieee80211_hw *hw=glue_hw();
       struct rtw89_m80211_local *local=hw_to_local(hw);
       const uint16_t win=r.window<OWLY_BA_WINDOW ? r.window : OWLY_BA_WINDOW;
+      const bool peer_amsdu=(r.capability&1u)!=0;
+      uint16_t max_amsdu=0;
+      if(peer_amsdu){
+       const bool large_mpdu=(p->applied_vht && (p->applied_vht_cap&3u)>=1u) ||
+           ((p->applied_ht_cap&0x0800u)!=0);
+       max_amsdu=large_mpdu ? 4900u : 3839u;
+      }
       struct ieee80211_ampdu_params a={
        .action=IEEE80211_AMPDU_TX_OPERATIONAL,.sta=p->sta,.tid=0,
-       .ssn=p->tx_qos_sn,.buf_size=win,.amsdu=false
+       .ssn=p->tx_qos_sn,.buf_size=win,.amsdu=peer_amsdu
       };
       const int ampdu_rc=local->ops->ampdu_action ?
           local->ops->ampdu_action(hw,owly_core04c_vif,&a) : -EOPNOTSUPP;
       if(!ampdu_rc){
        p->tx_ba_state=OWLY_TX_BA_OPERATIONAL;
        p->tx_ba_buf_size=win;
+       p->tx_ba_amsdu=peer_amsdu;
+       p->tx_ba_amsdu_max=max_amsdu;
        p->tx_ba_attempts=0;
-       IOLog("RTLAirLink AWDL TX BlockAck operational: peer=%02x:%02x:%02x:%02x:%02x:%02x tid=0 ssn=%u window=%u\n",
+       __atomic_store_n(&owly_amsdu_verified,0u,__ATOMIC_RELAXED);
+       __atomic_store_n(&owly_amsdu_init_fails,0u,__ATOMIC_RELAXED);
+       __atomic_store_n(&owly_amsdu_fallback,0u,__ATOMIC_RELEASE);
+       IOLog("RTLAirLink AWDL TX BlockAck operational: peer=%02x:%02x:%02x:%02x:%02x:%02x tid=0 ssn=%u window=%u amsdu=%u max=%u\n",
              p->mac[0],p->mac[1],p->mac[2],p->mac[3],p->mac[4],p->mac[5],
-             (unsigned)p->tx_qos_sn,(unsigned)win);
+             (unsigned)p->tx_qos_sn,(unsigned)win,(unsigned)peer_amsdu,(unsigned)max_amsdu);
       }else{
        p->tx_ba_state=OWLY_TX_BA_DECLINED;
        IOLog("RTLAirLink AWDL TX BlockAck ampdu_action failed: rc=%d\n",ampdu_rc);
@@ -765,7 +828,7 @@ static void owly_peer_tick(struct ieee80211_channel *ch)
     const unsigned tid=r.tid;spin_lock(&owly_peer_lock);const bool active=p->ba_map&(1u<<tid);p->ba_map&=~(1u<<tid);
     while(p->reorder[tid].active && p->reorder[tid].stored)owly_ba_advance(&p->reorder[tid],owly_peer_good,&q);
     owly_ba_clear(&p->reorder[tid],owly_peer_bad,&q);spin_unlock(&owly_peer_lock);owly_peer_queues_finish(&q);
-    if(active)(void)owly_peer_ba_firmware(p,tid,false,0,0);
+    if(active)(void)owly_peer_ba_firmware(p,tid,false,0,0,false);
    }else if(r.action==2 && !r.initiator && r.tid==0){
     owly_peer_tx_ba_stop(p,false);
     IOLog("RTLAirLink AWDL TX BlockAck deleted by peer\n");

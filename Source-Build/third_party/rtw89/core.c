@@ -1310,7 +1310,9 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	const u8 *frame = skb->data;
 
 	const bool is_qos = frame[0] == (IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_DATA);
+	const bool is_amsdu = is_qos && skb->len >= 26u && frame[24] == 0x80u && frame[25] == 0u;
 	const size_t hdr_len = is_qos ? 26 : 24;
+	const size_t snap_off = is_amsdu ? hdr_len + 14u : hdr_len;
 
 	/* The native radio submitter allocates a shared software sequence.
 	 * The default management path would replace it using a separate
@@ -1337,11 +1339,13 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    !(info->flags & IEEE80211_TX_INTFL_DONT_ENCRYPT) ||
 	    (info->flags & IEEE80211_TX_CTL_NO_ACK) || desc_info->is_bmc ||
 	    (frame[0] != IEEE80211_FTYPE_DATA && !is_qos) || frame[1] ||
-	    skb->len < hdr_len + 57u ||
-	    (is_qos && (frame[24] != 0 || frame[25] != 0)) ||
+	    skb->len < snap_off + 57u ||
+	    (is_qos && !is_amsdu && (frame[24] != 0 || frame[25] != 0)) ||
 	    memcmp(frame + 10, link->mac_addr, ETH_ALEN) ||
 	    memcmp(frame + 16, awdl_bssid, sizeof(awdl_bssid)) ||
-	    memcmp(frame + hdr_len, awdl_snap, sizeof(awdl_snap)))
+	    (is_amsdu && (memcmp(frame + hdr_len, frame + 4, ETH_ALEN) ||
+			  memcmp(frame + hdr_len + 6, frame + 10, ETH_ALEN))) ||
+	    memcmp(frame + snap_off, awdl_snap, sizeof(awdl_snap)))
 		return;
 
 	desc_info->port = link->port;

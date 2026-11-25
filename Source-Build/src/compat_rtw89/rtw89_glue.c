@@ -227,6 +227,7 @@ static void rtw89_awdl_probe_note(const unsigned char *frame, size_t len,
 /* OWLY_PHASE_G_PROBE_END */
 #include "rtw89_crypto.h"
 #include "core.h"
+#include "txrx.h"
 #include "coex.h"
 #include "phy.h"
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
@@ -437,10 +438,17 @@ static uint8_t owly_sync_txbuf[OWLY_SYNC_FRAME_MAX];
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
 static struct owly_native_link owly_link_state;
 static spinlock_t owly_link_lock;
-static uint8_t owly_link_txbuf[OWLY_LINK_FRAME_MAX];
+static uint8_t owly_link_txbuf[OWLY_LINK_AMSDU_MAX];
 static struct ieee80211_vif *owly_core04c_vif;
 static bool owly_tx_ring_stalled;
 static bool owly_tx_reclaimed;
+static uint64_t owly_tx_local_mac_u64;
+static inline uint64_t owly_pack_mac6(const uint8_t mac[6])
+{
+    return (uint64_t)mac[0] | ((uint64_t)mac[1] << 8) |
+           ((uint64_t)mac[2] << 16) | ((uint64_t)mac[3] << 24) |
+           ((uint64_t)mac[4] << 32) | ((uint64_t)mac[5] << 40);
+}
 static void owly_peer_init(void);
 static void owly_peer_drain_rx(void);
 static void owly_peer_fini(void);
@@ -978,8 +986,8 @@ static void glue_napi_post_poll(int done)
     if (!glue.up)
         return;
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
-    if (__atomic_exchange_n(&owly_tx_reclaimed, false, __ATOMIC_ACQ_REL) &&
-        __atomic_exchange_n(&owly_tx_ring_stalled, false, __ATOMIC_ACQ_REL))
+    if (__atomic_exchange_n(&owly_tx_reclaimed, false, __ATOMIC_SEQ_CST) &&
+        __atomic_exchange_n(&owly_tx_ring_stalled, false, __ATOMIC_SEQ_CST))
         wiphy_work_queue(glue_hw()->wiphy, &owly_sync_work.work);
 #endif
     if (!glue.ppdu_flush)
@@ -2078,28 +2086,54 @@ static void glue_tx_status(void *ctx, struct sk_buff *skb)
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     if(skb && skb->len>=81u && (skb->data[0]==8u || skb->data[0]==0x88u) &&
        !memcmp(skb->data+16,"\x00\x25\x00\xff\x94\x73",6)) {
-        const size_t ip_off = skb->data[0]==0x88u ? 42u : 40u;
-        const bool multicast=(skb->data[4]&1u)!=0;
-        const bool done=(IEEE80211_SKB_CB(skb)->flags&IEEE80211_TX_STAT_ACK)!=0;
-        spin_lock(&owly_link_lock);
-        const bool local=owly_link_state.active && !memcmp(skb->data+10,owly_link_state.local,6);
-        if(local && !multicast && done)++owly_link_state.tx_radio_acked;
-        spin_unlock(&owly_link_lock);
-        if(local) {
-            static volatile unsigned long mdns_reports,other_reports;
-            /* The TX builder puts IPv6 at offset 40 (Non-QoS) or 42 (QoS). */
-            const bool mdns=skb->len>=ip_off+48u && skb->data[ip_off+6]==17u &&
-                (get_unaligned_be16(skb->data+ip_off+40)==5353u ||
-                 get_unaligned_be16(skb->data+ip_off+42)==5353u);
-            const unsigned long count=__sync_add_and_fetch(
-                mdns ? &mdns_reports : &other_reports,1ul);
-            if(count<=16ul || !(count&(count-1ul)))
-                IOLog("OWLY IPv6 TX completion: count=%lu mdns=%u multicast=%u "
-                      "device_done=%u\n",count,(unsigned)mdns,(unsigned)multicast,(unsigned)done);
+        const bool is_qos = skb->data[0] == 0x88u;
+        const bool is_amsdu = is_qos && (skb->data[24] & 0x80u) != 0;
+        const bool multicast = (skb->data[4] & 1u) != 0;
+        const bool done = (IEEE80211_SKB_CB(skb)->flags & IEEE80211_TX_STAT_ACK) != 0;
+        const uint64_t active_mac = __atomic_load_n(&owly_tx_local_mac_u64, __ATOMIC_RELAXED);
+        const bool local = active_mac != 0 && owly_pack_mac6(skb->data + 10) == active_mac;
+        if (local && !multicast) {
+            if (is_amsdu)
+                owly_peer_tx_amsdu_note(done);
+            if (done) {
+                uint64_t msdus = 1u;
+                if (is_amsdu) {
+                    msdus = 0;
+                    size_t off = 26u;
+                    while (off + 14u <= skb->len && msdus < OWLY_LINK_AMSDU_SUBFRAMES) {
+                        const size_t slen = get_unaligned_be16(skb->data + off + 12u);
+                        if (slen < 56u || slen > skb->len - off - 14u)
+                            break;
+                        ++msdus;
+                        const size_t step = 14u + slen;
+                        off += step;
+                        if (off < skb->len)
+                            off += (4u - (step & 3u)) & 3u;
+                    }
+                    if (!msdus)
+                        msdus = 1u;
+                }
+                __atomic_fetch_add(&owly_link_state.tx_radio_acked, msdus, __ATOMIC_RELAXED);
+            }
         }
-    }
-    if (__atomic_load_n(&owly_tx_ring_stalled, __ATOMIC_ACQUIRE))
+        if (local) {
+            static volatile unsigned long mdns_reports, other_reports;
+            const size_t ip_off = is_qos ? 42u : 40u;
+            const bool mdns = !is_amsdu && skb->len >= ip_off + 48u &&
+                skb->data[ip_off + 6] == 17u &&
+                (get_unaligned_be16(skb->data + ip_off + 40) == 5353u ||
+                 get_unaligned_be16(skb->data + ip_off + 42) == 5353u);
+            const unsigned long count = __sync_add_and_fetch(
+                mdns ? &mdns_reports : &other_reports, 1ul);
+            if (count <= 16ul || !(count & (count - 1ul)))
+                IOLog("OWLY IPv6 TX completion: count=%lu mdns=%u multicast=%u amsdu=%u "
+                      "device_done=%u\n", count, (unsigned)mdns, (unsigned)multicast,
+                      (unsigned)is_amsdu, (unsigned)done);
+        }
         __atomic_store_n(&owly_tx_reclaimed, true, __ATOMIC_RELEASE);
+    } else if (__atomic_load_n(&owly_tx_ring_stalled, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&owly_tx_reclaimed, true, __ATOMIC_RELEASE);
+    }
 #endif
 #if defined(RTW89_AWDL_CORE04F_ONE_SHOT) && RTW89_AWDL_CORE04F_ONE_SHOT
     if (skb && owly_core04f_is_probe(skb->data, skb->len))
@@ -3162,6 +3196,7 @@ static void owly_sync_pause(bool clear)
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     spin_lock(&owly_link_lock);
     owly_link_reconcile(&owly_link_state,false,NULL,0,glue_now_us());
+    __atomic_store_n(&owly_tx_local_mac_u64, 0ull, __ATOMIC_RELEASE);
     spin_unlock(&owly_link_lock);
     owly_sync_state.broadcast_mif_submitted=false;
     __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELAXED);
@@ -3519,7 +3554,8 @@ static int owly_sync_write_frame(struct ieee80211_channel *ch,const uint8_t *p,s
     lockdep_assert_wiphy(hw->wiphy);
     if(!ch || owly_awdl_away())return -EBUSY;
     band=hw->wiphy->bands[ch->band];
-    if (!band || !owly_core04c_vif || n<24 || n>OWLY_SYNC_FRAME_MAX)
+    const size_t max_len = (data && ampdu) ? 5120u : OWLY_SYNC_FRAME_MAX;
+    if (!band || !owly_core04c_vif || n<24 || n>max_len)
         return -EOPNOTSUPP;
 #if !defined(OWLY_NATIVE_PEER_DATA) || !OWLY_NATIVE_PEER_DATA
     (void)ampdu;
@@ -3666,54 +3702,87 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
                   (unsigned)owly_sync_state.channel,(unsigned)length,rc);
     }
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
-    /* Drain up to two 64-MPDU A-MPDU windows per pass, kicking the PCI
-     * doorbell every 32 MPDUs so RTL8852BE begins transmitting while the
-     * next batch is staged without letting high-rate bursts fill the queue. */
-    const unsigned int budget = owly_peer_turbo ? 128u : 4u;
+    /* Drain up to 256 MPDUs (each carrying up to 3 A-MSDU subframes when
+     * negotiated), proactively reclaiming TXBDs/RPPs before writing and
+     * kicking the PCI doorbell every 16 A-MSDUs / 32 MPDUs to keep DMA full. */
+    const unsigned int budget = owly_peer_turbo ? 256u : 4u;
     unsigned int sent = 0;
     bool ring_stalled = false;
     int doorbell = -1;
+    struct rtw89_dev *rtwdev = glue_hw()->priv;
+    const u8 data_ch_dma = rtw89_chip_get_ch_dma(rtwdev, RTW89_TX_QSEL_BE_0);
+    const bool can_reclaim = rtwdev && rtwdev->hci.ops &&
+                             rtwdev->hci.ops->check_and_reclaim_tx_resource;
+    u32 tx_res = can_reclaim ?
+        rtw89_hci_check_and_reclaim_tx_resource(rtwdev, data_ch_dma) : budget;
+    struct owly_link_tx_qos_peer qos_peers[OWLY_RADIO_PEERS];
+    const unsigned n_qos_peers = owly_peer_fill_tx_qos(qos_peers);
     __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELAXED);
-    for(unsigned int i=0;i<budget && owly_sync_state.active;i++) {
-        unsigned int offset;
-        uint64_t generation;
-        spin_lock(&owly_link_lock);
-        rc=owly_link_next_tx(&owly_link_state,glue_now_us(),
-                             owly_sync_state.broadcast_mif_submitted,owly_link_txbuf,
-                             sizeof(owly_link_txbuf),&length,&offset,&generation);
-        spin_unlock(&owly_link_lock);
-        if(rc!=1)break;
-        const bool unicast = !(owly_link_txbuf[4] & 1u);
-        bool ampdu = false;
-        if (unicast) {
-            owly_peer_note_unicast_tx(owly_link_txbuf + 4);
-            uint16_t qos_sn = 0;
-            if (owly_peer_tx_ampdu_peek(owly_link_txbuf + 4, &qos_sn) &&
-                owly_link_promote_qos(owly_link_txbuf, &length,
-                                      sizeof(owly_link_txbuf), qos_sn, 0u))
-                ampdu = true;
+    for (unsigned int i = 0; i < budget && owly_sync_state.active; i++) {
+        if (can_reclaim && !tx_res) {
+            if (doorbell >= 0) {
+                rtw89_core_tx_kick_off(rtwdev, doorbell);
+                doorbell = -1;
+            }
+            tx_res = rtw89_hci_check_and_reclaim_tx_resource(rtwdev, data_ch_dma);
+            if (!tx_res) {
+                /* Store-then-recheck avoids a lost wakeup with NAPI RPQ. */
+                __atomic_store_n(&owly_tx_ring_stalled, true, __ATOMIC_SEQ_CST);
+                tx_res = rtw89_hci_check_and_reclaim_tx_resource(rtwdev, data_ch_dma);
+                if (!tx_res) {
+                    ring_stalled = true;
+                    break;
+                }
+                __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELEASE);
+            }
         }
-        rc=owly_sync_write_frame(ch,owly_link_txbuf,length,true,ampdu,&doorbell);
-        if (!rc && ampdu)
-            owly_peer_tx_ampdu_commit(owly_link_txbuf + 4);
+        unsigned int offset, batched = 0;
+        uint64_t generation;
+        bool is_qos = false, is_amsdu = false;
+        const uint64_t tx_now = glue_now_us();
         spin_lock(&owly_link_lock);
-        owly_link_tx_result(&owly_link_state,offset,generation,rc);
+        rc = owly_link_next_tx_batch(&owly_link_state, tx_now,
+                                     owly_sync_state.broadcast_mif_submitted,
+                                     qos_peers, n_qos_peers,
+                                     owly_link_txbuf, sizeof(owly_link_txbuf),
+                                     &length, &offset, &generation,
+                                     &batched, &is_qos, &is_amsdu);
         spin_unlock(&owly_link_lock);
-        if(rc) {
+        if (rc != 1)
+            break;
+        const bool unicast = !(owly_link_txbuf[4] & 1u);
+        if (unicast && !is_qos)
+            owly_peer_note_unicast_tx(owly_link_txbuf + 4);
+        rc = owly_sync_write_frame(ch, owly_link_txbuf, length, true, is_qos, &doorbell);
+        if (!rc && is_qos)
+            owly_peer_commit_tx_qos(owly_link_txbuf + 4, qos_peers, n_qos_peers, tx_now);
+        spin_lock(&owly_link_lock);
+        owly_link_tx_result_batch(&owly_link_state, offset, generation, batched, rc);
+        spin_unlock(&owly_link_lock);
+        if (rc) {
             if (rc == -ENOSPC || rc == -ENOMEM || rc == -EBUSY) {
+                __atomic_store_n(&owly_tx_ring_stalled, true, __ATOMIC_SEQ_CST);
+                if (can_reclaim &&
+                    rtw89_hci_check_and_reclaim_tx_resource(rtwdev, data_ch_dma) > 0u) {
+                    __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELEASE);
+                    tx_res = 1u;
+                    continue;
+                }
                 ring_stalled = true;
-                __atomic_store_n(&owly_tx_ring_stalled, true, __ATOMIC_RELEASE);
             }
             break;
         }
+        if (tx_res)
+            --tx_res;
         ++sent;
-        if (doorbell >= 0 && (sent & 31u) == 0u) {
-            rtw89_core_tx_kick_off(glue_hw()->priv, doorbell);
+        const unsigned kick_mask = is_amsdu ? 15u : 31u;
+        if (doorbell >= 0 && (sent & kick_mask) == 0u) {
+            rtw89_core_tx_kick_off(rtwdev, doorbell);
             doorbell = -1;
         }
     }
     if (doorbell >= 0)
-        rtw89_core_tx_kick_off(glue_hw()->priv, doorbell);
+        rtw89_core_tx_kick_off(rtwdev, doorbell);
 #endif
     if (owly_sync_state.active) {
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
@@ -3755,6 +3824,9 @@ static void owly_link_update_locked(struct ieee80211_channel *ch,uint64_t now)
     owly_link_reconcile(&owly_link_state,ch!=NULL,
         ch && owly_core04c_vif ? owly_core04c_vif->addr : NULL,
         ch ? (uint8_t)ch->hw_value : 0,now);
+    __atomic_store_n(&owly_tx_local_mac_u64,
+        owly_link_state.active ? owly_pack_mac6(owly_link_state.local) : 0ull,
+        __ATOMIC_RELEASE);
     owly_link_state.sync_enabled=ch && owly_sync_configured(&owly_sync_state);
     owly_link_state.starting=ch && !owly_sync_state.blocked && !owly_link_state.sync_enabled;
     owly_link_set_tx_paused(&owly_link_state,ch && owly_awdl_away(),now);

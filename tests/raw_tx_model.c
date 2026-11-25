@@ -52,7 +52,7 @@ struct ieee80211_tx_info {
  u32 flags; unsigned band,hw_queue;
  struct { struct { s8 idx; unsigned count; u32 flags; } rates[4]; struct ieee80211_vif *vif; } control;
 };
-struct sk_buff { u8 bytes[4096],*data; size_t len; unsigned priority,mapping; struct ieee80211_tx_info info; };
+struct sk_buff { u8 bytes[6144],*data; size_t len; unsigned priority,mapping; struct ieee80211_tx_info info; };
 #define IEEE80211_SKB_CB(skb) (&(skb)->info)
 struct rtw89_addr_cam_entry { bool valid; };
 struct rtw89_vif_link {
@@ -104,7 +104,7 @@ static struct { bool scanning; } glue;
 static unsigned checks,failures,hooks,submissions,kicks,frees;
 static unsigned last_priority,last_mapping,last_hw_queue;
 static struct rtw89_tx_desc_info last_desc;
-static u8 sent[2048]; static size_t sent_len;
+static u8 sent[6144]; static size_t sent_len;
 static bool alloc_fail; static int submit_result;
 #define CHECK(c) do { ++checks; if(!(c)) { ++failures; fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#c); } } while(0)
 static struct ieee80211_hw *glue_hw(void) { return &hw; }
@@ -224,6 +224,18 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  CHECK(last_desc.agg_en && last_desc.ampdu_num==63 && last_desc.ampdu_density==5);
  CHECK(!last_desc.hw_rts_en && !last_desc.rts_en && last_desc.tx_cnt_lmt==12 && last_desc.port==link.port);
  CHECK(!last_desc.hw_seq_mode && !last_desc.hw_ssn_sel && last_desc.seq==0x123);
+ /* Verify QoS A-MSDU inside A-MPDU (>2048B) keeps VHT RA + A-MPDU + AWDL port. */
+ struct sk_buff am=frame(IEEE80211_FTYPE_DATA|IEEE80211_STYPE_QOS_DATA,flags);
+ am.bytes[24]=0x80;am.bytes[25]=0;
+ memcpy(am.bytes+26,am.bytes+4,6);memcpy(am.bytes+32,am.bytes+10,6);
+ am.bytes[38]=0x05;am.bytes[39]=0xdc;
+ memcpy(am.bytes+40,snap,sizeof(snap));
+ am.len=3056;
+ doorbell=-1;
+ CHECK(owly_sync_write_frame(ch,am.bytes,am.len,true,true,&doorbell)==0);
+ CHECK(doorbell==IEEE80211_AC_BE);
+ CHECK(!last_desc.use_rate && !last_desc.dis_data_fb);
+ CHECK(last_desc.agg_en && last_desc.ampdu_num==63 && last_desc.ampdu_density==5 && last_desc.port==link.port);
  dev.channel.band_width=RTW89_CHANNEL_WIDTH_20;
  rate_link.ra.bw_cap=RTW89_CHANNEL_WIDTH_20;
  rate_peer.ampdu_map[0]=0;

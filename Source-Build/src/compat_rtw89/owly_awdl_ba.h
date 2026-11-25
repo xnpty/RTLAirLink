@@ -48,8 +48,8 @@ static inline size_t owly_ba_request_frame(const uint8_t peer[6],const uint8_t o
  if(!peer || !own || !out || tid>=16u || !window || window>OWLY_BA_WINDOW)return 0;
  memset(out,0,33);out[0]=0xd0;memcpy(out+4,peer,6);memcpy(out+10,own,6);memcpy(out+16,b,6);
  owly_ba_put16(out+22,(uint16_t)((sequence&4095u)<<4));out[24]=3;out[25]=0;out[26]=token;
- /* Immediate BlockAck (bit 1), no A-MSDU (bit 0 = 0), TID, buffer size. */
- owly_ba_put16(out+27,(uint16_t)(2u|((uint16_t)tid<<2)|(window<<6)));
+ /* Immediate BlockAck (bit 1) + A-MSDU supported (bit 0), TID, buffer size. */
+ owly_ba_put16(out+27,(uint16_t)(3u|((uint16_t)tid<<2)|(window<<6)));
  owly_ba_put16(out+29,0);owly_ba_put16(out+31,(uint16_t)((ssn&4095u)<<4));return 33;
 }
 static inline size_t owly_ba_response(const uint8_t request[33],const uint8_t own[6],
@@ -58,7 +58,9 @@ static inline size_t owly_ba_response(const uint8_t request[33],const uint8_t ow
  if(!request || !own || !r || !out || r->action!=0)return 0;
  memset(out,0,33);out[0]=0xd0;memcpy(out+4,request+10,6);memcpy(out+10,own,6);memcpy(out+16,request+16,6);
  owly_ba_put16(out+22,(uint16_t)((sequence&4095u)<<4));out[24]=3;out[25]=1;out[26]=r->token;
- owly_ba_put16(out+27,status);owly_ba_put16(out+29,(uint16_t)(2u|(uint16_t)r->tid<<2|r->window<<6));
+ owly_ba_put16(out+27,status);
+ /* Reflect initiator's A-MSDU support (bit 0): owly_awdl_frame.c decodes A-MSDUs. */
+ owly_ba_put16(out+29,(uint16_t)((r->capability&1u)|2u|(uint16_t)r->tid<<2|r->window<<6));
  owly_ba_put16(out+31,r->timeout);return 33;
 }
 /* Caller serializes; callbacks queue ownership transfers, never input/free under its lock. */

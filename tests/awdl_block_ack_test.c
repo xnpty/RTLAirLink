@@ -13,7 +13,15 @@ int main(void){
  assert(owly_ba_parse(f,33,own,&r) && r.window==64 && r.tid==7 && r.immediate && r.ssn==4093);
  assert(owly_ba_response(f,own,&r,0,4095,out)==33 && out[26]==19 && !owly_ba_le16(out+27));
  assert(!memcmp(out+4,peer,6) && !memcmp(out+10,own,6));
- assert(owly_ba_le16(out+29)==(2|(7<<2)|(64<<6)) && owly_ba_le16(out+31)==911);
+ assert(owly_ba_le16(out+29)==(3|(7<<2)|(64<<6)) && owly_ba_le16(out+31)==911);
+ /* Without initiator A-MSDU bit, response must keep bit 0 clear. */
+ owly_ba_put16(f+27,(uint16_t)(2|(7<<2)|(64<<6)));
+ assert(owly_ba_parse(f,33,own,&r) && owly_ba_response(f,own,&r,0,4095,out)==33);
+ assert(owly_ba_le16(out+29)==(2|(7<<2)|(64<<6)));
+ /* Outbound TX ADDBA Request advertises Immediate BA + A-MSDU Supported. */
+ assert(owly_ba_request_frame(peer,own,5,0,64,0x123,7,out)==33);
+ assert(owly_ba_le16(out+27)==(3|(0<<2)|(64<<6)) && owly_ba_le16(out+31)==(0x123u<<4));
+ owly_ba_put16(f+27,(uint16_t)(3|(7<<2)|(128<<6)));
  for(unsigned n=0;n<33;n++)assert(!owly_ba_parse(f,n,own,&r));
  for(unsigned bit=0;bit<8;bit++)if((1u<<bit)&0x47){f[1]=(uint8_t)(1u<<bit);assert(!owly_ba_parse(f,33,own,&r));f[1]=0;}
  f[4]^=2;assert(!owly_ba_parse(f,33,own,&r));f[4]^=2;f[16]^=1;assert(!owly_ba_parse(f,33,own,&r));f[16]^=1;
