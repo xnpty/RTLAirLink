@@ -1,56 +1,79 @@
 # RTLAirLink
 
-Driver Wi‑Fi thử nghiệm cho Realtek RTL8852BE trên macOS Tahoe, có AWDL và AirDrop native.
+Driver Wi-Fi, AWDL/AirDrop native (~59.2 MB/s wire 2 chiều) và iPhone Mirroring mượt mà cho Realtek RTL8852BE trên macOS Tahoe (x86_64).
 
-**Triển khai AWDL native do Anh Tài (xnpty) nghiên cứu, thiết kế và phát triển trong Owly/RTLAirLink.** [Ghi công và lịch sử mã nguồn](CREDITS.md)
+**Nghiên cứu, thiết kế và triển khai AWDL native bởi Anh Tài (xnpty) trong dự án Owly/RTLAirLink.** [Ghi công và lịch sử mã nguồn](CREDITS.md)
 
-[![Ủng hộ qua Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/taingo) · [Discord](https://discord.com/users/856029147750858793)
+[![Ủng hộ qua Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/taingo) · [Discord](https://discord.com/users/856029147750858793) · [English](README.md)
+
+## Danh sách card Realtek PCIe được hỗ trợ
+
+RTLAirLink tích hợp bảng PCI ID và firmware `rtw89` tương tự `AirPort_RTW89`. **Hiện chỉ có `RTL8852BE` đã được kiểm thử thực tế trên phần cứng.** Tất cả các card khác đều ở trạng thái **Untested (chưa kiểm thử)** và **AirDrop / AWDL có thể không hoạt động** do luồng AWDL native (CAM/BlockAck/radio) hiện đang tối ưu riêng cho `RTL8852B`.
+
+| Mẫu card | PCI ID (`10ec:xxxx`) | Chuẩn Wi-Fi | Trạng thái | AirDrop / AWDL |
+| --- | --- | --- | --- | --- |
+| **RTL8852BE** | `10ec:b852`, `10ec:b85b` | Wi-Fi 6 (802.11ax, 2×2, 80 MHz) | **Đã kiểm thử (Verified)** | **Hoạt động** (~59.2 MB/s wire 2 chiều, iPhone Mirroring) |
+| **RTL8851BE** | `10ec:b851` | Wi-Fi 6 (802.11ax, 1×1, 80 MHz) | **Untested (Chưa kiểm thử)** | **Chưa kiểm thử — AirDrop có thể không hoạt động** |
+| **RTL8852AE** | `10ec:8852`, `10ec:a85a` | Wi-Fi 6 (802.11ax, 2×2, 80 MHz) | **Untested (Chưa kiểm thử)** | **Chưa kiểm thử — AirDrop có thể không hoạt động** |
+| **RTL8852BTE** | `10ec:b520` | Wi-Fi 6 (802.11ax, 2×2, 80 MHz) | **Untested (Chưa kiểm thử)** | **Chưa kiểm thử — AirDrop có thể không hoạt động** |
+| **RTL8852CE** | `10ec:c852` | Wi-Fi 6E (802.11ax, 2×2, 160 MHz) | **Untested (Chưa kiểm thử)** | **Chưa kiểm thử — AirDrop có thể không hoạt động** |
+| **RTL8922AE** | `10ec:8922`, `10ec:892b` | Wi-Fi 7 (802.11be, 2×2, 160 MHz) | **Untested (Chưa kiểm thử)** | **Chưa kiểm thử — AirDrop có thể không hoạt động** |
+| **RTL8922DE** | `10ec:892d`, `10ec:882d`, `10ec:895d` | Wi-Fi 7 (802.11be, 2×2, 160 MHz) | **Untested (Chưa kiểm thử)** | **Chưa kiểm thử — AirDrop có thể không hoạt động** |
 
 ## Yêu cầu
 
-- macOS Tahoe 26 trên x86_64 (Intel hoặc AMD), card Realtek RTL8852BE và EFI OpenCore đã khởi động được.
-- Python 3.9 trở lên để chạy trình cài.
-- AirDrop dùng Bluetooth để dò thiết bị. Trình cài có thể thiết lập Bluetooth Realtek USB tương thích.
+- macOS Tahoe 26 trên x86_64 (Intel hoặc AMD) và một EFI OpenCore đang khởi động được.
+- Python 3.9 trở lên để chạy trình cài tự động.
+- AirDrop cần Bluetooth để dò thiết bị. Gói phát hành đã đóng gói sẵn `BlueToolFixup.kext` và `RealtekBluetoothFirmware.kext` cho Bluetooth USB Realtek tương thích (dùng cờ `--with-bluetooth`).
 
-Wi-Fi cần `Lilu.kext` từ 1.7.3 trở lên và ba kext sau. [Phiên bản và nguồn tải](docs/DEPENDENCIES.md)
+## Cài đặt v0.4.0
 
-- `IOSkywalkFamily.kext`
-- `IO80211FamilyLegacy.kext`
-- `AMFIPass.kext`
+### Cài nhanh bằng 1 lệnh Terminal (khuyên dùng)
 
-## Cài v0.3.0
+~~~bash
+curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash
+~~~
 
-1. Tải và giải nén [RTLAirLink-v0.3.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.3.0/RTLAirLink-v0.3.0-x86_64.zip).
-2. Mở `Install-RTLAirLink.command`. Kiểm tra đúng EFI trong bản xem trước, rồi gõ `y` để sao lưu và cài.
+Nếu muốn cài hoặc thay luôn bộ kext Bluetooth Realtek USB (`BlueToolFixup.kext` + `RealtekBluetoothFirmware.kext` + `-btlfxallowanyaddr` + NVRAM Bluetooth):
+
+~~~bash
+curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash -s -- --with-bluetooth
+~~~
+
+### Cài offline / bằng file ZIP
+
+1. Tải và giải nén [RTLAirLink-v0.4.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/RTLAirLink-v0.4.0-x86_64.zip).
+2. Mở `Install-RTLAirLink.command`, kiểm tra đúng EFI trong bản xem trước rồi gõ `y` để sao lưu và cài.
 3. Khởi động lại macOS.
 
-Trình cài dùng lại kext tương thích, tải các kext Wi-Fi còn thiếu, xếp đúng thứ tự nạp và tự thêm thiết lập OpenCore cần thiết. [Thứ tự nạp và cách cài thủ công](docs/INSTALL.md)
+**Lệnh cài v0.4.0 tự động làm những gì?**
+- **Đóng gói sẵn toàn bộ kext cần thiết đã kiểm chứng trên Tahoe** (`Lilu.kext`, `RTLAirBridge.kext`, `IOSkywalkFamily.kext`, `IO80211FamilyLegacy.kext`, `AMFIPass.kext`, `RTLAirLink.kext` + `RTLAirLinkFront.kext`, kèm kext Bluetooth tùy chọn và `ocvalidate`) — không cần tải thêm từ ngoài.
+- **Tự cài mới hoặc thay thế** các kext Wi-Fi cũ/chưa patch trên EFI sau khi sao lưu đầy đủ về `~/Downloads/RTLAirLink-Backups/`.
+- **Tự chỉnh `config.plist`**: sắp xếp đúng thứ tự nạp trong `Kernel → Add`, chặn `com.apple.iokit.IOSkywalkFamily` (`Exclude`, `MinKernel 23.0.0`), đặt `SecureBootModel = Disabled`, thêm `boot-args` cần thiết (`-amfipassbeta`, thêm `-btlfxallowanyaddr` nếu bật `--with-bluetooth`) và kiểm tra hợp lệ bằng `ocvalidate`.
+- **Tùy chọn cài `rtlairlink-rtgd`** (dịch vụ chạy nền tự động kích hoạt RTG 16/16 slot giúp iPhone Mirroring xem video không bị khựng/tụt FPS) và `rtlairlinkctl`.
 
-Để cài qua Terminal, chạy lệnh dưới đây.
+[Hướng dẫn cài đặt chi tiết và cài thủ công](docs/INSTALL.md)
 
-~~~bash
-curl -fLO https://github.com/xnpty/RTLAirLink/releases/download/v0.3.0/install-rtlairlink.sh && \
-  bash install-rtlairlink.sh
-~~~
+## Có gì mới và đã sửa ở v0.4.0?
 
-Nếu cần cài Bluetooth Realtek USB tương thích, chạy `bash install-rtlairlink.sh --with-bluetooth`. [Thiết lập Bluetooth](docs/INSTALL.md#realtek-bluetooth-for-airdrop)
+- **AirDrop ~59.2 MB/s wire đối xứng 2 chiều (Mac ↔ iPhone):** Sửa lỗi race lock timestamp làm xóa peer giữa chừng, nâng hàng đợi TX lên 4096 gói + thu hồi TXBD chủ động + TX status không khóa + ghép khung 3-subframe A-MSDU hai chiều trên phần cứng A-MPDU 64 MPDU. Cả hai chiều đạt **59.2 MB/s wire (~49–50 MB/s thực tế)**, `0` TX refused / `0` TX expired.
+- **iPhone Mirroring mượt không tụt FPS (RTG Peer Cache + `rtlairlink-rtgd`):** Bổ sung `APPLE80211_IOC_PEER_CACHE_MAXIMUM_SIZE (130)`, `APPLE80211_IOC_PEER_CACHE_CONTROL (143)` và đẩy nhanh sự kiện `0x33` trong `RTLAirLinkFront`, kết hợp daemon nhẹ `rtlairlink-rtgd` tự bật chế độ RTG (`0x8e87` → `0xffff`, đủ 16/16 slot) khi mở iPhone Mirroring và tự tắt khi đóng.
+- **Sửa lỗi sóng 5 GHz, roaming kênh & độ ổn định:** Sửa giới hạn công suất phát 5 GHz vùng VN, sửa lỗi bật AWDL độc lập trên 5 GHz và race `SET 120` `ENXIO`, chặn nhảy kênh `149 ↔ 6` và quét nền khi đang gửi file, sửa lỗi CAM Port 0 che mất RX BlockAck và tắt HW RTS bị lỗi trên AWDL.
+- **Gói cài tất-cả-trong-một + lệnh cài 1 dòng:** Gộp sẵn toàn bộ kext cần thiết đã chạy ổn định trên Tahoe vào file tải về.
 
-## Khắc phục sự cố và báo lỗi
+[Ghi chú phát hành đầy đủ](docs/RELEASE_NOTES.md) · [Chi tiết đo đạc](docs/STATUS.md)
 
-- **Trình cài báo lỗi cấu hình.** Chạy `bash install-rtlairlink-setup.sh --efi /Volumes/EFI --dry-run` với đường dẫn EFI của bạn. Nếu bản OpenCore có cấu trúc cấu hình khác, dùng `--ocvalidate` trỏ tới trình kiểm tra đi kèm bản đó. [Hướng dẫn kiểm tra EFI](docs/INSTALL.md#preview-and-validate)
-- **macOS không khởi động.** Boot từ EFI OpenCore dự phòng và khôi phục các tệp đã thay. [Khôi phục EFI](docs/INSTALL.md#recover-the-efi)
-- **Wi-Fi biến mất sau khi khởi động lại.** Kiểm tra máy đã boot đúng EFI và xem các kext Wi-Fi đã nạp chưa.
+## Kiểm tra & Khắc phục sự cố
 
-~~~bash
-kmutil showloaded --list-only | grep -Ei 'Lilu|IOSkywalkFamily|IO80211FamilyLegacy|AMFIPass|io\.github\.xnpty\.RTLAirLink|BlueToolFixup|RealtekBluetoothFirmware'
-~~~
+- **Chạy thử xem trước (không ghi EFI):**
+  ~~~bash
+  curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash -s -- --efi /Volumes/EFI --dry-run
+  ~~~
+- **Kiểm tra kext đã nạp sau khi khởi động lại:**
+  ~~~bash
+  kmutil showloaded --list-only | grep -Ei 'Lilu|IOSkywalkFamily|IO80211FamilyLegacy|AMFIPass|io\.github\.xnpty\.RTLAirLink|BlueToolFixup|RealtekBluetoothFirmware'
+  ~~~
+- **Kiểm tra dịch vụ iPhone Mirroring RTG:** `/usr/local/libexec/rtlairlink-rtgd --status`
+- **Khôi phục EFI:** Bản sao lưu `config.plist` và mọi kext bị thay luôn nằm tại `~/Downloads/RTLAirLink-Backups/`. [Hướng dẫn khôi phục](docs/INSTALL.md#recover-the-efi) · [Báo lỗi trên GitHub](https://github.com/xnpty/RTLAirLink/issues/new)
 
-- **AirDrop dừng ở Waiting hoặc Sending.** Kiểm tra Bluetooth và IPv6 link-local trên `awdl0` bằng `ifconfig awdl0`. Ghi rõ chiều gửi, hai thiết bị có thấy nhau không và bước bị kẹt.
-
-Khi báo lỗi, gửi phiên bản và build macOS (`sw_vers`), phiên bản OpenCore, mẫu card và PCI ID, các bước tái hiện cùng đầu ra của trình cài hoặc danh sách kext liên quan. Ẩn thông tin nhận dạng thiết bị và mạng riêng trong log trước khi đăng. [Tạo issue trên GitHub](https://github.com/xnpty/RTLAirLink/issues/new)
-
-## Kết quả kiểm thử
-
-Đã kiểm thử thực tế trên phần cứng RTL8852BE chạy macOS Tahoe build 25G241 với OpenCore 1.0.9. Nhờ đàm phán VHT 80 MHz 2SS và kích hoạt BlockAck phần cứng 2 chiều (TX/RX A-MPDU) trên v0.3.0, tốc độ AirDrop trực tiếp qua `awdl0` (`transport: "awdl"`) đạt đỉnh **50.77 MB/s** (`406.2 Mbps`, file 182 MB bay trong 3.59 giây) chiều Mac → iPhone và **24.97 MB/s** (`200 Mbps`, file 32 MiB trong 1.34 giây) chiều iPhone → Mac, hoạt động ổn định không treo. [Chi tiết](docs/STATUS.md)
-
-[Build từ mã nguồn](docs/BUILD.md) · [Giấy phép và ghi công](CREDITS.md)
+[Build từ mã nguồn](docs/BUILD.md) · [Giấy phép (GPLv2)](LICENSE) · [Ghi công](CREDITS.md)

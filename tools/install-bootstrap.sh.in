@@ -1,10 +1,11 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-only
-# RTLAirLink release installer.
+# RTLAirLink @TAG@ one-command release installer.
 set -euo pipefail
 scratch="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/rtlairlink.XXXXXXXX")"
 trap '/bin/rm -rf "$scratch"' EXIT
 archive="$scratch/@ARCHIVE@"
+echo "Downloading @ARCHIVE@..."
 /usr/bin/curl --proto '=https' --proto-redir '=https' -fsSL --retry 2 \
     --max-time 180 -o "$archive" '@RELEASE_URL@/@ARCHIVE@'
 actual="$(/usr/bin/shasum -a 256 "$archive")"
@@ -13,4 +14,8 @@ if [[ "${actual%% *}" != '@DIGEST@' ]]; then
     exit 1
 fi
 /usr/bin/ditto -x -k "$archive" "$scratch"
-/bin/bash "$scratch/RTLAirLink-@TAG@/Install-RTLAirLink.command" "$@"
+if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
+    /bin/bash "$scratch/RTLAirLink-@TAG@/Install-RTLAirLink.command" "$@" </dev/tty
+else
+    /bin/bash "$scratch/RTLAirLink-@TAG@/Install-RTLAirLink.command" "$@"
+fi

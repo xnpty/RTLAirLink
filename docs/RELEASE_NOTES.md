@@ -1,8 +1,39 @@
-# RTLAirLink v0.3.0
+# RTLAirLink v0.4.0
 
-Native AWDL for Realtek was researched, designed, and originally implemented by Anh Tài (xnpty) in Owly/RTLAirLink. [Credits and source history](../CREDITS.md)
+Native AWDL research, design, and implementation by Anh Tài (xnpty) in Owly/RTLAirLink. [Credits and source history](../CREDITS.md)
 
-- **VHT 80 MHz 2SS & 64 KB RX A-MPDU AWDL negotiation:** Implements `APPLE80211_IOC_HT_CAPABILITY` (`154`) and `APPLE80211_IOC_VHT_CAPABILITY` (`214`) in the 18-byte Legacy ABI, emits 802.11 VHT Capabilities (`TLV 17`) in PSF/MIF frames, and advertises 80 MHz operating class `128` (`0x7c`) channel sequences on 5 GHz.
-- **Bidirectional hardware BlockAck (TX & RX A-MPDU):** Promotes unicast AWDL IPv6 data frames to QoS Data (`0x88`), negotiates TID 0 TX ADDBA Request/Response with automatic Non-QoS fallback and idle/session resync, enables hardware A-MPDU aggregation (`agg_en`, `ampdu_num = 63`, `tx_cnt_lmt = 12`), and assigns the auxiliary P2P-client VIF to high Address CAM index (`31`) so per-peer `NET_TYPE_AD_HOC` entries match first (`rx_mac_id == sta_mac_id`) for hardware RX BlockAck.
-- **High-throughput TX/RX pipeline & NAPI fairness:** Expands the native AWDL TX queue to 512 frames with 32-frame burst draining and batched PCI doorbells, expands the RX reorder delivery queue to 1024 frames with 32-packet batch delivery, uses spinlock-serialized `wiphy_work_queue` for unicast output wakeups, reserves NAPI budget for `RXQ` during heavy `RPQ` TX completion bursts, and holds the active 5 GHz data channel during unicast TX.
-- **Live hardware benchmarks (`awdl0` / `transport: "awdl"` on RTL8852BE, macOS Tahoe 25G241):** Reaches **50.77 MB/s** (`406.2 Mbps`, 182 MB in 3.59 s — **19.9× faster** than baseline 2.55 MB/s) Mac-to-iPhone and **24.97 MB/s** (`200 Mbps`, 32 MiB in 1.34 s — **11.8× faster** than 2.12 MB/s) iPhone-to-Mac. [Verification details](STATUS.md)
+## What's New
+
+- **Symmetric ~59.2 MB/s Wire AirDrop (Mac ↔ iPhone):**
+  - Expanded native AWDL TX queue to **4096 frames**, added proactive PCI TXBD/RPP reclamation, lock-free TX status accounting, 256-MPDU burst draining with batched PCI doorbells, and coalesced TX wakeups.
+  - Added adaptive **bidirectional 3-subframe A-MSDU** (`4900 B` max MPDU over 64-MPDU hardware A-MPDU) with automatic ACK verification and rate-aware fallback.
+  - Both directions now hit **59.2 MB/s wire (~49–50 MB/s end-to-end)** on RTL8852BE ↔ iPhone 13 with **`0` TX refused** and **`0` TX expired**.
+- **Smooth iPhone Mirroring (AWDL RTG Peer Cache + `rtlairlink-rtgd`):**
+  - Implemented `APPLE80211_IOC_PEER_CACHE_MAXIMUM_SIZE (130)` (`{1, 32}`), `APPLE80211_IOC_PEER_CACHE_CONTROL (143)` (`ADD_IND=1` / `DELETE_IND=3`), and expedited async `reportDataPathEvents(0x33)` in `RTLAirLinkFront` (`OwlyNativePeerDataRevision = 8`), fixing `SIOCSA80211 type=164` (`EIO`) failures during AWDL traffic registration.
+  - Added the lightweight C daemon **`rtlairlink-rtgd`** (`/usr/local/libexec/rtlairlink-rtgd` + LaunchDaemon) that monitors active `iPhone Mirroring` sockets on `awdl0`, enables AWDL RTG (`shared_slots = 0xffff`, 16/16 slots; iPhone replies TLV `31:17` in ~29 ms) to eliminate 196–262 ms off-channel FPS stutters (`0x8e87`), and cleanly releases RTG when Mirroring closes.
+- **All-in-One Release & One-Command OpenCore Installer:**
+  - `RTLAirLink-v0.4.0-x86_64.zip` now bundles all required Tahoe-verified kexts (`Lilu.kext`, `RTLAirBridge.kext`, `IOSkywalkFamily.kext`, `IO80211FamilyLegacy.kext`, `AMFIPass.kext`, `RTLAirLink.kext` + `RTLAirLinkFront.kext`, optional Realtek USB Bluetooth kexts), `ocvalidate`, `rtlairlinkctl`, and `rtlairlink-rtgd`.
+  - One-command installer (`curl -fsSL .../install-rtlairlink.sh | bash`) backs up your EFI, installs or replaces required kexts, sorts `Kernel → Add` into exact load order, configures `Kernel → Block`, `SecureBootModel`, and `boot-args`, validates with `ocvalidate`, and optionally installs `rtlairlink-rtgd`.
+
+## Bug Fixes (since v0.3.0)
+
+- **Fixed TX timestamp lock race wiping active peers:** Sampled `tx_now` strictly inside `owly_link_lock` so concurrent `owly_link_enqueue()` calls cannot advance `last_now_us` ahead of the drain loop and trigger backward-clock peer/queue resets.
+- **Fixed standalone 5 GHz AWDL bringup & `SET 120` `ENXIO` race:** Fixed standalone 5 GHz VHT80 activation, multicast port/RX handling, and standalone BTC coexistence so AirDrop works reliably even without an associated AP.
+- **Fixed VN 5 GHz regulatory TX power & disabled broken HW RTS on AWDL peers:** Overrode restrictive firmware VN 5 GHz regd limits and turned off hardware RTS/CTS for AWDL NoDS/AD_HOC peers while keeping 12 HW retries with firmware rate fallback.
+- **Fixed multichannel `ch149 ↔ ch6` ping-pong & mid-transfer background scans:** Prevented unnecessary channel bounces and deferred background scans during active unicast AWDL transfers.
+- **Fixed RX BlockAck CAM shadowing & RX DMA reorder stalls:** Prevented standalone Port 0 CAM entries from shadowing per-peer RX BlockAck, tuned RX DMA sync/ring + BA hole timeout, added active-RX slot continuation, and improved TX ADDBA recovery + UMI `0x45` reporting.
+
+## Supported Realtek Cards
+
+- **RTL8852BE** (`10ec:b852`, `10ec:b85b`): **Tested & Verified** on macOS Tahoe 25G241 (Wi-Fi 6 + AirDrop + iPhone Mirroring).
+- **RTL8851BE** (`10ec:b851`), **RTL8852AE** (`10ec:8852`, `10ec:a85a`), **RTL8852BTE** (`10ec:b520`), **RTL8852CE** (`10ec:c852`), **RTL8922AE** (`10ec:8922`, `10ec:892b`), **RTL8922DE** (`10ec:892d`, `10ec:882d`, `10ec:895d`): **Untested — Wi-Fi is untested and AirDrop / AWDL may not work.**
+
+## Live Benchmarks (`awdl0` on RTL8852BE, macOS Tahoe 25G241)
+
+| Test (RTL8852BE ↔ iPhone 13) | v0.3.0 | **v0.4.0** |
+| --- | --- | --- |
+| AirDrop Mac → iPhone (186 MB wire) | 50.77 MB/s | **59.2 MB/s wire** (~49.1 MB/s e2e, `3.142 s`, `0` refused/expired) |
+| AirDrop iPhone → Mac (186 MB wire) | 16.95 MB/s | **59.2 MB/s wire** (~49.8 MB/s e2e, `3.144 s`, `0` reorder timeouts) |
+| iPhone Mirroring online video | Periodic 196–262 ms stutter (`0x8e87`) | **Smooth 60 fps** (`shared_slots=0xffff` 16/16 via auto-RTG) |
+
+[Verification details](STATUS.md) · [Installation guide](INSTALL.md) · [Hướng dẫn tiếng Việt](../README_VI.md)

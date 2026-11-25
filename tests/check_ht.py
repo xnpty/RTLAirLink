@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from check_vif_restore import extract_function
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def run(source, output, cc=None):

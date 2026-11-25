@@ -2,7 +2,7 @@
 """Execute production BA parser/reorder and radio peer glue; hardware is mocked."""
 from pathlib import Path
 import json,os,platform,shutil,subprocess,tempfile
-ROOT=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parents[1]
 def production_function(text,name):
     start=text.index('int '+name+'(')
     opening=text.index('{',start);depth=1;at=opening+1

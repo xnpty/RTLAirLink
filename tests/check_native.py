@@ -3,7 +3,7 @@
 from pathlib import Path
 import json,os,platform,shutil,subprocess,tempfile
 import check_platform
-ROOT=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parents[1]
 
 def run(source,output,cc=None,cxx=None):
     source,output=Path(source),Path(output);output.mkdir(parents=True,exist_ok=True)
