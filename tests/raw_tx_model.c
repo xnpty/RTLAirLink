@@ -189,7 +189,7 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  const u32 word=rtw89_build_txwd_info0(&last_desc);
  CHECK(!FIELD_GET(RTW89_TXWD_INFO0_USE_RATE,word));
  CHECK(!FIELD_GET(RTW89_TXWD_INFO0_DISDATAFB,word));
- CHECK(last_desc.hw_rts_en && last_desc.rts_en && last_desc.tx_cnt_lmt_en && last_desc.tx_cnt_lmt==12);
+ CHECK(!last_desc.hw_rts_en && !last_desc.rts_en && last_desc.tx_cnt_lmt_en && last_desc.tx_cnt_lmt==12 && last_desc.port==link.port);
  CHECK(last_desc.data_retry_lowest_rate==RTW89_HW_RATE_OFDM6);
  CHECK(hooks==0 && !last_desc.agg_en && last_desc.mac_id==rate_link.mac_id);
  CHECK(!last_desc.hw_seq_mode && !last_desc.hw_ssn_sel);
@@ -222,7 +222,7 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  CHECK(doorbell==IEEE80211_AC_BE);
  CHECK(!last_desc.use_rate && !last_desc.dis_data_fb);
  CHECK(last_desc.agg_en && last_desc.ampdu_num==63 && last_desc.ampdu_density==5);
- CHECK(last_desc.hw_rts_en && last_desc.rts_en && last_desc.tx_cnt_lmt==12);
+ CHECK(!last_desc.hw_rts_en && !last_desc.rts_en && last_desc.tx_cnt_lmt==12 && last_desc.port==link.port);
  CHECK(!last_desc.hw_seq_mode && !last_desc.hw_ssn_sel && last_desc.seq==0x123);
  dev.channel.band_width=RTW89_CHANNEL_WIDTH_20;
  rate_link.ra.bw_cap=RTW89_CHANNEL_WIDTH_20;

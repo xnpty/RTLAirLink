@@ -1340,11 +1340,12 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    memcmp(frame + hdr_len, awdl_snap, sizeof(awdl_snap)))
 		return;
 
-	if (!tx_req->sta) {
-		/* Keep the fallback port consistent with the VIF's MAC ID. */
-		desc_info->port = link->port;
+	/* Always keep TXWD MULTIPORT_ID aligned with the AWDL auxiliary VIF
+	 * port (matching CMAC SET_CMC_TBL_MULTI_PORT_ID). */
+	desc_info->port = link->port;
+
+	if (!tx_req->sta)
 		return;
-	}
 
 	const struct rtw89_sta_link *peer = tx_req->rtwsta_link;
 	const struct rtw89_chan *chan = rtw89_chan_get(rtwdev, link->chanctx_idx);
@@ -1353,12 +1354,13 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    peer->ra.bw_cap <= chan->band_width) {
 		/* Let firmware choose the data rate using the AWDL peer's
 		 * negotiated HT/VHT rate table. Keep the raw frame and sequence.
-		 * Protect all unicast peer data (including TCP SYN/TLS before
-		 * TX BlockAck is operational) with HW RTS/CTS and 12 retries. */
+		 * Keep RTS/CTS off for AWDL NoDS/AD_HOC peers (HW RTS fails
+		 * CTS handshake on large TLS/Discover/A-MPDU frames), while
+		 * keeping 12 HW retries with firmware rate fallback. */
 		desc_info->use_rate = false;
 		desc_info->dis_data_fb = false;
-		desc_info->hw_rts_en = true;
-		desc_info->rts_en = true;
+		desc_info->hw_rts_en = false;
+		desc_info->rts_en = false;
 		desc_info->tx_cnt_lmt_en = true;
 		desc_info->tx_cnt_lmt = 12;
 		if (is_qos && (info->flags & IEEE80211_TX_CTL_AMPDU) &&

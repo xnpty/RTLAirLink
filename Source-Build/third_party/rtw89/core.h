@@ -8949,6 +8949,13 @@ static inline u8 rtw89_regd_get(struct rtw89_dev *rtwdev, u8 band)
 	if (regulatory->txpwr_uk_follow_etsi && txpwr_regd == RTW89_UK)
 		return RTW89_ETSI;
 
+	/* Firmware regd element overrides rtw89_regd_map and maps VN 5 GHz to
+	 * ETSI (1-7 dBm on ch 149). Vietnam Circular 08/2021 permits 30 dBm on
+	 * 5.47-5.85 GHz; use FCC 5 GHz limits (18.5-21 dBm) for VN. */
+	if (band == RTW89_BAND_5G &&
+	    regd->alpha2[0] == 'V' && regd->alpha2[1] == 'N')
+		return RTW89_FCC;
+
 	return txpwr_regd;
 }
 
