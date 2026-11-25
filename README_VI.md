@@ -57,7 +57,7 @@ curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-r
 ## Có gì mới và đã sửa ở v0.4.0?
 
 - **AirDrop ~59.2 MB/s wire đối xứng 2 chiều (Mac ↔ iPhone):** Sửa lỗi race lock timestamp làm xóa peer giữa chừng, nâng hàng đợi TX lên 4096 gói + thu hồi TXBD chủ động + TX status không khóa + ghép khung 3-subframe A-MSDU hai chiều trên phần cứng A-MPDU 64 MPDU. Cả hai chiều đạt **59.2 MB/s wire (~49–50 MB/s thực tế)**, `0` TX refused / `0` TX expired.
-- **iPhone Mirroring mượt không tụt FPS (RTG Peer Cache + `rtlairlink-rtgd`):** Bổ sung `APPLE80211_IOC_PEER_CACHE_MAXIMUM_SIZE (130)`, `APPLE80211_IOC_PEER_CACHE_CONTROL (143)` và đẩy nhanh sự kiện `0x33` trong `RTLAirLinkFront`, kết hợp daemon nhẹ `rtlairlink-rtgd` tự bật chế độ RTG (`0x8e87` → `0xffff`, đủ 16/16 slot) khi mở iPhone Mirroring và tự tắt khi đóng.
+- **iPhone Mirroring mượt không tụt FPS (RTG Peer Cache + `rtlairlink-rtgd`):** Bổ sung `APPLE80211_IOC_PEER_CACHE_MAXIMUM_SIZE (130)`, `APPLE80211_IOC_PEER_CACHE_CONTROL (143)` và đẩy nhanh sự kiện `0x33` trong `RTLAirLinkFront`, kết hợp daemon nhẹ `rtlairlink-rtgd` tự bật chế độ RTG (`0x8e87` → `0xffff`, đủ 16/16 slot) khi mở iPhone Mirroring và tự tắt khi đóng. *(Để kích hoạt iPhone Mirroring trên Hackintosh, cài thêm [Mirra](https://github.com/eiyuumiru/Mirra) — ghi công chủ dự án **eiyuumiru** và **Dino-VN**.)*
 - **Sửa lỗi sóng 5 GHz, roaming kênh & độ ổn định:** Sửa giới hạn công suất phát 5 GHz vùng VN, sửa lỗi bật AWDL độc lập trên 5 GHz và race `SET 120` `ENXIO`, chặn nhảy kênh `149 ↔ 6` và quét nền khi đang gửi file, sửa lỗi CAM Port 0 che mất RX BlockAck và tắt HW RTS bị lỗi trên AWDL.
 - **Gói cài tất-cả-trong-một + lệnh cài 1 dòng:** Gộp sẵn toàn bộ kext cần thiết đã chạy ổn định trên Tahoe vào file tải về.
 

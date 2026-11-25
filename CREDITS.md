@@ -6,6 +6,7 @@
 
 ## Upstream and third-party contributions
 
+- **eiyuumiru and Dino-VN ([Mirra](https://github.com/eiyuumiru/Mirra))** created and contributed to **Mirra**, the community companion that enables Apple's native iPhone Mirroring on Intel Hackintosh systems (paired with RTLAirLink's AWDL RTG transport).
 - **FranciumOS and AirPort_RTW89 contributors** provided the macOS port of the Realtek Wi-Fi driver. Their v0.7.0 beta credits the AWDL implementation incorporated from RTLAirLink. Its installer and documentation served as references for the shared OpenCore Wi-Fi setup. [Upstream credits](https://github.com/FranciumOS-org/AirPort_RTW89/blob/v0.7.0-BETA/CREDITS.md) · [Upstream setup](https://github.com/FranciumOS-org/AirPort_RTW89/blob/v0.7.0-BETA/README.md#installing)
 - **Realtek and Linux wireless contributors** developed Linux rtw89 and the Linux wireless APIs and headers. The source tree preserves their individual license notices. [Linux rtw89](https://github.com/torvalds/linux/tree/master/drivers/net/wireless/realtek/rtw89)
 - **AirPort_RTW88, Realtek-AirPort-Family and OpenIntelWireless contributors** supplied macOS compatibility foundations and references for IO80211 integration. [AirPort_RTW88](https://github.com/FranciumOS-org/AirPort_RTW88) · [Realtek-AirPort-Family](https://github.com/xnoah222/Realtek-AirPort-Family) · [OpenIntelWireless](https://github.com/OpenIntelWireless/itlwm)

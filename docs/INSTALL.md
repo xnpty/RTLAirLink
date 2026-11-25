@@ -77,6 +77,8 @@ Additional OpenCore settings configured automatically:
 
 ## iPhone Mirroring RTG Daemon (`rtlairlink-rtgd`)
 
+> **Note:** Enabling Apple's iPhone Mirroring on an Intel Hackintosh requires **[Mirra](https://github.com/eiyuumiru/Mirra)** (credits to **eiyuumiru** and **Dino-VN**). RTLAirLink's AWDL RTG support + `rtlairlink-rtgd` handles the wireless side so video streaming stays smooth.
+
 `rtlairlink-rtgd` runs as a lightweight LaunchDaemon (`/Library/LaunchDaemons/io.github.xnpty.rtlairlink.rtgd.plist`). Whenever **iPhone Mirroring** establishes an active connection over `awdl0`, it automatically registers AWDL Real-Time Guided (`MPRemoteCamera`, `0x40`) so AWDL holds 16/16 slots (`shared_slots=0xffff`) instead of dropping to `0x8e87` every 262 ms, and cleanly clears RTG when Mirroring closes.
 
 Manage it manually from the extracted ZIP folder at any time:
