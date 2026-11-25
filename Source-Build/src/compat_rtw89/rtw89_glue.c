@@ -442,7 +442,10 @@ static uint8_t owly_link_txbuf[OWLY_LINK_AMSDU_MAX];
 static struct ieee80211_vif *owly_core04c_vif;
 static bool owly_tx_ring_stalled;
 static bool owly_tx_reclaimed;
+static bool owly_tx_work_armed;
 static uint64_t owly_tx_local_mac_u64;
+static uint64_t owly_tx_mpdus_amsdu, owly_tx_amsdu_subframes, owly_tx_mpdus_qos;
+static uint64_t owly_tx_mpdus_legacy, owly_tx_ring_stalls;
 static inline uint64_t owly_pack_mac6(const uint8_t mac[6])
 {
     return (uint64_t)mac[0] | ((uint64_t)mac[1] << 8) |
@@ -2930,13 +2933,13 @@ static void owly_radio_maybe_attach(void)
      * It never runs while an AP is connected/joining or a scan is active. */
     struct rtw89_mlme_status idle;
     rtw89_mlme_get_status(&idle);
-    const uint64_t now=glue_now_us();
     if (idle.awdl_channel_owned && !glue.scanning &&
         !owly_sync_state.explicitly_disabled) {
         uint16_t seq, social_slots = 0;
         uint32_t phase;
         unsigned peers = 0;
         spin_lock(&owly_link_lock);
+        const uint64_t now=glue_now_us();
         const bool rooted = owly_link_clock(&owly_link_state, now, &seq, &phase,
                                             &social_slots, &peers);
         const uint8_t data_ch = owly_link_data_channel(&owly_link_state, now);
@@ -3023,7 +3026,7 @@ static void owly_radio_maybe_attach(void)
                 IOLog("OWLY standalone: channel hold refused freq=%u rc=%d\n",
                       (unsigned)start_freq, rc);
             } else if (!rc) {
-                owly_idle_heard_us = now;
+                owly_idle_heard_us = glue_now_us();
                 IOLog("OWLY standalone: initial hold freq=%u\n", (unsigned)start_freq);
             }
             primary = rtw89_mlme_awdl_shared_chanctx();
@@ -3201,6 +3204,7 @@ static void owly_sync_pause(bool clear)
     owly_sync_state.broadcast_mif_submitted=false;
     __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELAXED);
     __atomic_store_n(&owly_tx_reclaimed, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&owly_tx_work_armed, false, __ATOMIC_RELAXED);
 #endif
     if (owly_core04c_vif && owly_sync_state.handed_off && local->ops->flush)
         local->ops->flush(hw,owly_core04c_vif,BIT(hw->queues)-1,false);
@@ -3353,11 +3357,11 @@ static void owly_mc_end_hook(void)
  * 6 = ch 6, 4 = ch 44, 9 = ch 149, . = elsewhere. Diagnostics only. */
 static void owly_mc_log_peers(void)
 {
-    const uint64_t now = glue_now_us();
-    if (owly_mc.peer_log_us && now - owly_mc.peer_log_us < 5000000u)
+    if (owly_mc.peer_log_us && glue_now_us() - owly_mc.peer_log_us < 5000000u)
         return;
-    owly_mc.peer_log_us = now;
     spin_lock(&owly_link_lock);
+    const uint64_t now = glue_now_us();
+    owly_mc.peer_log_us = now;
     const struct owly_native_link *l = &owly_link_state;
     IOLog("OWLY mc: ch %u home=%d present=%d follow=%u data_ch=%u rooted=%d "
           "ok6/44/149=%d%d%d slots=0x%04x visits=%llu\n", (unsigned)owly_mc.channel,
@@ -3717,6 +3721,7 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
         rtw89_hci_check_and_reclaim_tx_resource(rtwdev, data_ch_dma) : budget;
     struct owly_link_tx_qos_peer qos_peers[OWLY_RADIO_PEERS];
     const unsigned n_qos_peers = owly_peer_fill_tx_qos(qos_peers);
+    __atomic_store_n(&owly_tx_work_armed, false, __ATOMIC_SEQ_CST);
     __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELAXED);
     for (unsigned int i = 0; i < budget && owly_sync_state.active; i++) {
         if (can_reclaim && !tx_res) {
@@ -3730,6 +3735,7 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
                 __atomic_store_n(&owly_tx_ring_stalled, true, __ATOMIC_SEQ_CST);
                 tx_res = rtw89_hci_check_and_reclaim_tx_resource(rtwdev, data_ch_dma);
                 if (!tx_res) {
+                    ++owly_tx_ring_stalls;
                     ring_stalled = true;
                     break;
                 }
@@ -3737,10 +3743,13 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
             }
         }
         unsigned int offset, batched = 0;
-        uint64_t generation;
+        uint64_t generation, tx_now = 0;
         bool is_qos = false, is_amsdu = false;
-        const uint64_t tx_now = glue_now_us();
+        /* Sample tx_now strictly INSIDE owly_link_lock so a concurrent
+         * owly_link_enqueue() cannot advance last_now_us ahead of tx_now and
+         * trip expire()'s backward-clock peer/queue wipe. */
         spin_lock(&owly_link_lock);
+        tx_now = glue_now_us();
         rc = owly_link_next_tx_batch(&owly_link_state, tx_now,
                                      owly_sync_state.broadcast_mif_submitted,
                                      qos_peers, n_qos_peers,
@@ -3768,9 +3777,18 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
                     tx_res = 1u;
                     continue;
                 }
+                ++owly_tx_ring_stalls;
                 ring_stalled = true;
             }
             break;
+        }
+        if (is_amsdu) {
+            ++owly_tx_mpdus_amsdu;
+            owly_tx_amsdu_subframes += batched;
+        } else if (is_qos) {
+            ++owly_tx_mpdus_qos;
+        } else {
+            ++owly_tx_mpdus_legacy;
         }
         if (tx_res)
             --tx_res;
@@ -3883,7 +3901,7 @@ int rtw89_glue_native_output(const uint8_t *eth,size_t n)
             !owly_link_state.tx_paused) {
             rc = owly_link_enqueue(&owly_link_state, eth, n, glue_now_us());
             spin_unlock(&owly_link_lock);
-            if (!rc)
+            if (!rc && !__atomic_exchange_n(&owly_tx_work_armed, true, __ATOMIC_ACQ_REL))
                 wiphy_work_queue(glue_hw()->wiphy, &owly_sync_work.work);
             return rc;
         }
@@ -4185,6 +4203,13 @@ int rtw89_glue_awdl_sync_status(struct rtw89_glue_awdl_sync_status *out)
     out->handed_off=owly_sync_state.handed_off; out->failed=owly_sync_state.failed;
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     out->native_mi_handed_off=owly_sync_state.native_mi_handed_off;
+    out->tx_mpdus_amsdu=owly_tx_mpdus_amsdu;
+    out->tx_amsdu_subframes=owly_tx_amsdu_subframes;
+    out->tx_mpdus_qos=owly_tx_mpdus_qos;
+    out->tx_mpdus_legacy=owly_tx_mpdus_legacy;
+    out->tx_ring_stalls=owly_tx_ring_stalls;
+    owly_peer_tx_diag(&out->tx_ba_state,&out->tx_ba_amsdu,
+                      &out->tx_amsdu_fallback,&out->tx_peer_rate_mbps);
 #endif
     out->skipped=owly_sync_state.skipped;
     out->config_mask=owly_sync_state.native.committed;
@@ -4348,6 +4373,9 @@ static int glue_up_locked(void)
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELAXED);
     __atomic_store_n(&owly_tx_reclaimed, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&owly_tx_work_armed, false, __ATOMIC_RELAXED);
+    owly_tx_mpdus_amsdu = owly_tx_amsdu_subframes = owly_tx_mpdus_qos = 0;
+    owly_tx_mpdus_legacy = owly_tx_ring_stalls = 0;
 #endif
 #endif
     /* OWLY_PHASE_P_OTHER_BSS_BEGIN

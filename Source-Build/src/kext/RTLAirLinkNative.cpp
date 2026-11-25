@@ -2461,6 +2461,17 @@ int RTLAirLink::nativeAwdlSyncRequest(bool isSet,int number,void *data)
         setProperty("OwlyMCVisits",st.mc_visits,64);
         setProperty("OwlyMCNullFailures",st.mc_null_failures,64);
         setProperty("OwlyMCMaxSwitchUS",st.mc_max_switch_us,64);
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+        setProperty("OwlyNativeTXMPDUsAMSDU",st.tx_mpdus_amsdu,64);
+        setProperty("OwlyNativeTXAMSDUSubframes",st.tx_amsdu_subframes,64);
+        setProperty("OwlyNativeTXMPDUsQoS",st.tx_mpdus_qos,64);
+        setProperty("OwlyNativeTXMPDUsLegacy",st.tx_mpdus_legacy,64);
+        setProperty("OwlyNativeTXRingStalls",st.tx_ring_stalls,64);
+        setProperty("OwlyNativeTXBAState",static_cast<unsigned long long>(st.tx_ba_state),32);
+        setProperty("OwlyNativeTXBAAMSDU",st.tx_ba_amsdu);
+        setProperty("OwlyNativeTXAMSDUFallback",st.tx_amsdu_fallback);
+        setProperty("OwlyNativeTXPeerRateMbps",static_cast<unsigned long long>(st.tx_peer_rate_mbps),32);
+#endif
         return kIOReturnSuccess;
     }
     if (number==APPLE80211_IOC_AWDL_SYNC_FRAME_TEMPLATE) {

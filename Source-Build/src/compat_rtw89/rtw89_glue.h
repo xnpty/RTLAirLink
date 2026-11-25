@@ -192,6 +192,11 @@ struct rtw89_glue_awdl_sync_status {
     bool mc_enabled, mc_present;
     uint16_t mc_slots;
     uint64_t mc_visits, mc_null_failures, mc_max_switch_us;
+    /* Native AWDL TX burst / A-MSDU / BA diagnostics (read-only, zero hot-path cost). */
+    uint64_t tx_mpdus_amsdu, tx_amsdu_subframes, tx_mpdus_qos, tx_mpdus_legacy, tx_ring_stalls;
+    uint8_t tx_ba_state;
+    bool tx_ba_amsdu, tx_amsdu_fallback;
+    uint16_t tx_peer_rate_mbps;
 };
 int rtw89_glue_awdl_config(bool set, unsigned number, void *data);
 int rtw89_glue_awdl_ht_capability(void *output, size_t capacity);
