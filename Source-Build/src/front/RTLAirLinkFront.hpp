@@ -111,18 +111,21 @@ private:
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     bool owlyNativeStart();
     void owlyNativeStop();
-    void owlyNativeSchedule(uint64_t delay_us);
+    void owlyNativeSchedule(uint64_t delay_us,bool expedite=false);
     static void owlyNativeTick(thread_call_param_t,thread_call_param_t);
     bool owlyNativeReceive(const struct owly_abi6_packet *);
     bool owlyNativeAcquire(IO80211VirtualInterface **,OSObject **);
     void owlyNativeRelease(IO80211VirtualInterface *,OSObject *);
+    bool owlyNativeAcquireData(IO80211VirtualInterface **);
+    void owlyNativeReleaseData(IO80211VirtualInterface *);
     thread_call_t _owlyNativeCall=nullptr;
     thread_t _owlyNativeCallbackThread=nullptr;
     thread_t _owlyNativeOwnerThread=nullptr;
     OSObject *_owlyNativePeer=nullptr;
     IO80211VirtualInterface *_owlyNativePeerVif=nullptr;
     bool _owlyNativeClosed=true,_owlyNativePending=false,_owlyNativeEnabled=false;
-    unsigned _owlyNativeUsers=0,_owlyNativeTicks=0;
+    unsigned _owlyNativeUsers=0,_owlyNativeDataUsers=0,_owlyNativeTicks=0,_owlyServiceWaiters=0;
+    uint64_t _owlyServiceBusyWaits=0;
     uint16_t _owlyNativeLastWindow=0;
     bool _owlyNativeHaveWindow=false;
     uint64_t _owlyNativeActionCalls=0,_owlyNativeDataCalls=0,_owlyNativeWindowCalls=0;
@@ -135,6 +138,17 @@ private:
     uint64_t _owlyNativeActionAllocFailures=0;
     uint64_t _owlyNativeNextPeerAdmissionUS=0,_owlyNativePeerAddAttempts=0;
     uint64_t _owlyNativePeerAddVerified=0,_owlyNativePeerAddFailed=0,_owlyNativePeerResubmissions=0;
+    /* Peer-cache control (SET143) indications owed to IO80211AWDLPeerManager. */
+    void owlyNativeNotePeerCache(const uint8_t mac[6],uint32_t opcode);
+    uint8_t _owlyPeerCacheMac[16][6]={};
+    uint32_t _owlyPeerCacheOp[16]={};
+    unsigned _owlyPeerCacheHead=0,_owlyPeerCacheCount=0;
+    uint64_t _owlyPeerCacheNoted=0,_owlyPeerCacheReported=0,_owlyPeerCacheDropped=0;
+    /* Unicast MI (SET149) completions owed to IO80211AWDLPeerManager. */
+    void owlyNativeNoteUMI(const uint8_t mac[6]);
+    uint8_t _owlyUmiMac[8][6]={};
+    unsigned _owlyUmiHead=0,_owlyUmiCount=0;
+    uint64_t _owlyUmiNoted=0,_owlyUmiReported=0,_owlyUmiDropped=0;
 #endif
 #if defined(RTW89_AWDL_NATIVE_FRONT_OBSERVE) && RTW89_AWDL_NATIVE_FRONT_OBSERVE
     bool owlyVifEvent(IO80211VirtualInterface *vif, UInt role, uint32_t event,

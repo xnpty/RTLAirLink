@@ -397,7 +397,17 @@ static bool shared_slot_open(const struct owly_link_peer *p,uint8_t channel,
                              enum owly_link_tx_kind kind)
 {
     const unsigned slot=(seq/4u)&15u;
-    if(p->channels[slot]!=channel)return false;
+    if(p->channels[slot]!=channel) {
+        /* A '.' (0) slot is unspecified/infra, not another social channel.
+         * If the peer just sent us unicast data/ACKs on this channel within
+         * the current AW, keep unicast TX/ACKs flowing instead of stalling
+         * 200+ ms waiting for the next advertised slot. */
+        if (kind == OWLY_LINK_TX_UNICAST && p->channels[slot] == 0u &&
+            p->channel == channel && p->last_data_rx_us &&
+            now >= p->last_data_rx_us && now - p->last_data_rx_us <= OWLY_LINK_AW_US)
+            return true;
+        return false;
+    }
     /* A real MIF or IPv6 packet in this AW gives us an opportunity to
      * transmit even after the initial wake interval. */
     const uint64_t heard=p->last_mif_rx_us>p->last_data_rx_us ?
@@ -536,7 +546,10 @@ bool owly_link_window(struct owly_native_link *s,uint64_t now,struct owly_link_w
     memset(out,0,sizeof(*out));expire(s,now);
     out->actions=s->actions;out->data_rx_admitted=s->data_rx_admitted;
     out->tx_enqueued=s->tx_enqueued;out->tx_handoffs=s->tx_handoffs;
-    out->tx_refused=s->tx_refused;out->tx_expired=s->tx_expired;out->tx_radio_acked=s->tx_radio_acked;
+    out->tx_refused=s->tx_refused;out->tx_expired=s->tx_expired;
+    out->tx_radio_acked=__atomic_load_n(&s->tx_radio_acked,__ATOMIC_RELAXED);
+    out->tx_refused_full=s->tx_refused_full;out->tx_refused_no_peer=s->tx_refused_no_peer;
+    out->tx_refused_other=s->tx_refused_other;
     out->queued=s->count;
     for(i=0;i<OWLY_LINK_PEERS;i++)if(s->peers[i].used)++out->peers;
     if(!s->active || s->tx_paused)return false;
@@ -647,11 +660,11 @@ int owly_link_enqueue(struct owly_native_link *s,const uint8_t *eth,size_t n,uin
     struct owly_link_frame *f;size_t size;unsigned at;int rc;
     if(!s || !s->active || (!s->sync_enabled && !s->starting))return -ENETDOWN;
     expire(s,now);
-    if(s->count==OWLY_LINK_QUEUE) {++s->tx_refused;return -ENOBUFS;}
+    if(s->count==OWLY_LINK_QUEUE) {++s->tx_refused;++s->tx_refused_full;return -ENOBUFS;}
     /* Reuse payload storage freed by replies that passed a held query. */
     at=queue_alloc_slot(s);f=&s->queue[at];
     rc=owly_link_build_tx(eth,n,s->local,0,0,f->bytes,sizeof(f->bytes),&size);
-    if(rc) {queue_free_slot(s,at);++s->tx_refused;return rc;}
+    if(rc) {queue_free_slot(s,at);++s->tx_refused;++s->tx_refused_other;return rc;}
     memcpy(f->destination,f->bytes+4,6);
     f->kind=tx_kind(f->destination,f->bytes+40,size-40);
     /* BSD can emit the first Bonjour query or announcement as soon as the
@@ -663,7 +676,7 @@ int owly_link_enqueue(struct owly_native_link *s,const uint8_t *eth,size_t n,uin
         return -ENETDOWN;
     }
     f->awaiting_first_mif=!s->sync_enabled;
-    if(!(f->destination[0]&1u) && !find(s,f->destination)) {queue_free_slot(s,at);++s->tx_refused;return -EHOSTUNREACH;}
+    if(!(f->destination[0]&1u) && !find(s,f->destination)) {queue_free_slot(s,at);++s->tx_refused;++s->tx_refused_no_peer;return -EHOSTUNREACH;}
     f->length=(uint16_t)size;f->queued_us=now;f->pause_credit_us=0;f->generation=s->generation;
     s->queue_order[(s->head+s->count)%OWLY_LINK_QUEUE]=(uint16_t)at;
     ++s->count;++s->tx_enqueued;
@@ -752,25 +765,157 @@ static void remove_queued(struct owly_native_link *s,unsigned offset)
         s->queue_order[(s->head+i)%OWLY_LINK_QUEUE]=s->queue_order[(s->head+i+1u)%OWLY_LINK_QUEUE];
 }
 
-int owly_link_next_tx(struct owly_native_link *s,uint64_t now,bool first_mif_submitted,
-                      uint8_t *out,
-                      size_t cap,size_t *n,unsigned *offset,uint64_t *generation) {
+static void remove_queued_batch(struct owly_native_link *s,unsigned offset,unsigned count)
+{
+    if(!count || offset>=s->count)return;
+    if(count>s->count-offset)count=s->count-offset;
+    for(unsigned k=0;k<count;++k) {
+        const unsigned at=(s->head+offset+k)%OWLY_LINK_QUEUE;
+        queue_free_slot(s,s->queue_order[at]);
+    }
+    s->count-=count;
+    if(!offset) {
+        s->head=(s->head+count)%OWLY_LINK_QUEUE;
+        return;
+    }
+    for(unsigned i=offset;i<s->count;++i)
+        s->queue_order[(s->head+i)%OWLY_LINK_QUEUE]=s->queue_order[(s->head+i+count)%OWLY_LINK_QUEUE];
+}
+
+static const struct owly_link_tx_qos_peer *find_qos_peer(
+    const struct owly_link_tx_qos_peer *peers,unsigned n_peers,const uint8_t dst[6])
+{
+    if(!peers || !n_peers)return NULL;
+    for(unsigned i=0;i<n_peers;++i)
+        if(peers[i].valid && !memcmp(peers[i].mac,dst,6))
+            return &peers[i];
+    return NULL;
+}
+
+static void put_be16(uint8_t *p,uint16_t v)
+{
+    p[0]=(uint8_t)(v>>8);
+    p[1]=(uint8_t)v;
+}
+
+int owly_link_next_tx_batch(struct owly_native_link *s,uint64_t now,bool first_mif_submitted,
+                            const struct owly_link_tx_qos_peer *qos_peers,unsigned n_qos_peers,
+                            uint8_t *out,size_t cap,size_t *n,unsigned *offset,
+                            uint64_t *generation,unsigned *count_out,bool *is_qos_out,
+                            bool *is_amsdu_out)
+{
     struct owly_link_frame *f;
-    if(!s || !out || !n || !offset || !generation || cap<OWLY_LINK_FRAME_MAX)return -EINVAL;
-    *n=0;expire(s,now);
+    if(!s || !out || !n || !offset || !generation || !count_out ||
+       !is_qos_out || !is_amsdu_out || cap<OWLY_LINK_FRAME_MAX)
+        return -EINVAL;
+    *n=0;*count_out=0;*is_qos_out=false;*is_amsdu_out=false;
+    expire(s,now);
     if(!s->active || !s->sync_enabled || s->tx_paused)return 0;
+    uint8_t blocked_dst[6]={0};
+    bool have_blocked_dst=false;
     for(unsigned i=0;i<s->count;) {
         f=&s->queue[s->queue_order[(s->head+i)%OWLY_LINK_QUEUE]];
         if(now<f->queued_us || now-f->queued_us>OWLY_LINK_TX_TTL_US+f->pause_credit_us ||
            f->generation!=s->generation) {
             remove_queued(s,i);++s->tx_expired;continue;
         }
-        if((f->awaiting_first_mif && !first_mif_submitted) ||
-           !can_send(s,f->destination,now,f->kind)) {
-            /* A held startup announcement or peer must not block a ready
-             * unicast reply to a different peer. */
+        if(f->kind==OWLY_LINK_TX_UNICAST && have_blocked_dst &&
+           !memcmp(f->destination,blocked_dst,6)) {
             ++i;
             continue;
+        }
+        if((f->awaiting_first_mif && !first_mif_submitted) ||
+           !can_send(s,f->destination,now,f->kind)) {
+            if(f->kind==OWLY_LINK_TX_UNICAST && !have_blocked_dst) {
+                memcpy(blocked_dst,f->destination,6);
+                have_blocked_dst=true;
+            }
+            ++i;
+            continue;
+        }
+        const struct owly_link_tx_qos_peer *qp=f->kind==OWLY_LINK_TX_UNICAST ?
+            find_qos_peer(qos_peers,n_qos_peers,f->destination) : NULL;
+        if(qp && f->length>=40u && f->bytes[0]==0x08u) {
+            const size_t lim=qp->max_amsdu<cap ? qp->max_amsdu : cap;
+            const unsigned max_sub=qp->max_subframes>OWLY_LINK_AMSDU_SUBFRAMES ?
+                OWLY_LINK_AMSDU_SUBFRAMES : qp->max_subframes;
+            if(max_sub>=2u && lim>=26u+14u+(size_t)(f->length-24u)+14u+56u && i+1u<s->count) {
+                /* Check whether at least one contiguous same-peer unicast frame fits. */
+                const struct owly_link_frame *f1=
+                    &s->queue[s->queue_order[(s->head+i+1u)%OWLY_LINK_QUEUE]];
+                const bool f1_ok=f1->kind==OWLY_LINK_TX_UNICAST &&
+                    f1->generation==s->generation &&
+                    now>=f1->queued_us &&
+                    now-f1->queued_us<=OWLY_LINK_TX_TTL_US+f1->pause_credit_us &&
+                    !memcmp(f1->destination,f->destination,6) &&
+                    f1->length>=40u && f1->bytes[0]==0x08u;
+                const size_t sub0=14u+(size_t)(f->length-24u);
+                const size_t pad0=(4u-(sub0&3u))&3u;
+                const size_t sub1=f1_ok ? 14u+(size_t)(f1->length-24u) : 0u;
+                if(f1_ok && 26u+sub0+pad0+sub1<=lim) {
+                    memset(out,0,26u);
+                    out[0]=0x88u;
+                    memcpy(out+4,f->destination,6);
+                    memcpy(out+10,s->local,6);
+                    memcpy(out+16,bssid,6);
+                    put16(out+22,(uint16_t)((qp->qos_sn&4095u)<<4));
+                    put16(out+24,0x0080u); /* TID 0, A-MSDU Present */
+                    size_t pos=26u;
+                    unsigned batched=0;
+                    for(unsigned k=0;k<max_sub && i+k<s->count;++k) {
+                        const struct owly_link_frame *fk=
+                            &s->queue[s->queue_order[(s->head+i+k)%OWLY_LINK_QUEUE]];
+                        if(k>0) {
+                            if(fk->kind!=OWLY_LINK_TX_UNICAST ||
+                               fk->generation!=s->generation ||
+                               now<fk->queued_us ||
+                               now-fk->queued_us>OWLY_LINK_TX_TTL_US+fk->pause_credit_us ||
+                               memcmp(fk->destination,f->destination,6) ||
+                               fk->length<40u || fk->bytes[0]!=0x08u)
+                                break;
+                        }
+                        const size_t msdu_len=(size_t)fk->length-24u;
+                        const size_t sub_len=14u+msdu_len;
+                        const size_t pad=k>0 ? ((4u-((pos-26u)&3u))&3u) : 0u;
+                        if(pos+pad+sub_len>lim)
+                            break;
+                        if(pad) {
+                            memset(out+pos,0,pad);
+                            pos+=pad;
+                        }
+                        memcpy(out+pos,fk->destination,6);
+                        memcpy(out+pos+6,s->local,6);
+                        put_be16(out+pos+12,(uint16_t)msdu_len);
+                        memcpy(out+pos+14,fk->bytes+24,msdu_len);
+                        put16(out+pos+14+10,(uint16_t)(s->awdl_sequence+batched));
+                        pos+=sub_len;
+                        ++batched;
+                    }
+                    *n=pos;
+                    *offset=i;
+                    *generation=s->generation;
+                    *count_out=batched;
+                    *is_qos_out=true;
+                    *is_amsdu_out=true;
+                    return 1;
+                }
+            }
+            /* Single-MSDU QoS Data emitted directly (no memmove). */
+            if((size_t)f->length+2u<=cap) {
+                memcpy(out,f->bytes,24u);
+                out[0]=0x88u;
+                put16(out+22,(uint16_t)((qp->qos_sn&4095u)<<4));
+                put16(out+24,0u);
+                memcpy(out+26,f->bytes+24,(size_t)f->length-24u);
+                put16(out+36,s->awdl_sequence);
+                *n=(size_t)f->length+2u;
+                *offset=i;
+                *generation=s->generation;
+                *count_out=1u;
+                *is_qos_out=true;
+                *is_amsdu_out=false;
+                return 1;
+            }
         }
         memcpy(out,f->bytes,f->length);*n=f->length;
         /* Assign sequence numbers in handoff order, including when a
@@ -779,22 +924,43 @@ int owly_link_next_tx(struct owly_native_link *s,uint64_t now,bool first_mif_sub
         put16(out+34,s->awdl_sequence);
         *offset=i;
         *generation=s->generation;
+        *count_out=1u;
+        *is_qos_out=false;
+        *is_amsdu_out=false;
         return 1;
-    }return 0;
+    }
+    return 0;
+}
+
+void owly_link_tx_result_batch(struct owly_native_link *s,unsigned offset,
+                               uint64_t generation,unsigned count,int rc)
+{
+    if(!s || !count || generation!=s->generation || offset>=s->count ||
+       rc==-ENOMEM || rc==-ENOSPC || rc==-EBUSY)
+        return;
+    if(count>s->count-offset)count=s->count-offset;
+    remove_queued_batch(s,offset,count);
+    if(rc) {
+        s->tx_refused+=count;
+        s->tx_refused_other+=count;
+    } else {
+        ++s->wifi_sequence;
+        s->awdl_sequence=(uint16_t)(s->awdl_sequence+count);
+        s->tx_handoffs+=count;
+    }
+}
+
+int owly_link_next_tx(struct owly_native_link *s,uint64_t now,bool first_mif_submitted,
+                      uint8_t *out,
+                      size_t cap,size_t *n,unsigned *offset,uint64_t *generation) {
+    unsigned count=0;
+    bool is_qos=false,is_amsdu=false;
+    return owly_link_next_tx_batch(s,now,first_mif_submitted,NULL,0,
+                                   out,cap,n,offset,generation,&count,&is_qos,&is_amsdu);
 }
 void owly_link_tx_result(struct owly_native_link *s,unsigned offset,uint64_t generation,int rc)
 {
-    if(!s || generation!=s->generation || offset>=s->count ||
-       rc==-ENOMEM || rc==-ENOSPC || rc==-EBUSY)
-        return;
-    remove_queued(s,offset);
-    if(rc) {
-        ++s->tx_refused;
-    } else {
-        ++s->wifi_sequence;
-        ++s->awdl_sequence;
-        ++s->tx_handoffs;
-    }
+    owly_link_tx_result_batch(s,offset,generation,1u,rc);
 }
 void owly_link_prefer(struct owly_native_link *s,const uint8_t master[6]) {
     if(s && mac_ok(master)) {

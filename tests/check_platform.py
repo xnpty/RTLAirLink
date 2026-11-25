@@ -65,6 +65,6 @@ def run(source,output,cc=None):
 
 if __name__=='__main__':
     import argparse
-    root=Path(__file__).resolve().parent
+    root=Path(__file__).resolve().parents[1]
     p=argparse.ArgumentParser();p.add_argument('--source',type=Path,default=root/'Source-Build');p.add_argument('--out',type=Path,default=root/'validation/platform');a=p.parse_args()
     print(json.dumps(run(a.source,a.out),indent=2))

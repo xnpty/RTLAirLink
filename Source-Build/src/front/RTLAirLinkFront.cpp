@@ -423,6 +423,9 @@ void RTLAirLinkFront::stop(IOService *provider)
             ;
         IOLockLock(_owlyVifLock);
         _owlyAWDLStopping = true;
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+        IOLockWakeup(_owlyVifLock, &_owlyNativeUsers, false);
+#endif
         const bool active = _owlyAWDLRequestBusy || _owlyVifBusy || _owlyVifMethodBusy;
         if (nested && active) {
             /* Cannot wait for ourselves or tear down an object which Apple
@@ -911,6 +914,20 @@ bool RTLAirLinkFront::owlyServiceIoctl(IO80211Interface *interface,
     retain();
     IOWorkLoop *loop = _workLoop;
     loop->retain();
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    bool waited = false;
+    if (!loop->inGate()) {
+        IOLockLock(_owlyVifLock);
+        ++_owlyServiceWaiters;
+        waited = true;
+        while (_owlyNativeUsers && _owlyNativeOwnerThread != current_thread() &&
+               !_owlyAWDLStopping) {
+            ++_owlyServiceBusyWaits;
+            IOLockSleep(_owlyVifLock, &_owlyNativeUsers, THREAD_UNINT);
+        }
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     OwlyServiceCall call = {interface, vif, net, command, envelope, ENXIO};
     const IOReturn rc = loop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
@@ -919,6 +936,13 @@ bool RTLAirLinkFront::owlyServiceIoctl(IO80211Interface *interface,
             args->result = self->owlyServiceIoctlOnGate(args);
             return kIOReturnSuccess;
         }, this, &call);
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (waited) {
+        IOLockLock(_owlyVifLock);
+        --_owlyServiceWaiters;
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     *result = rc == kIOReturnSuccess ? call.result : ENXIO;
     loop->release();
     /* Deferred stop is finished in apple80211_ioctl AFTER backLeave(). */
@@ -1521,6 +1545,45 @@ SInt32 RTLAirLinkFront::apple80211VirtualRequest(UInt type, int number,
                     static_cast<unsigned long long>(static_cast<uint32_t>(rc)),32);
         return rc;
     }
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    /* Legacy4C's IO80211P2PDataPathManager queries GET130 during AWDL setup
+     * and issues SET143 (ADD=0 / DELETE=2 / UPDATE=6) before RTG/UMI traffic
+     * registration. Match AirPort_BrcmNIC: answer GET130 with a bounded cache
+     * limit and complete SET143 asynchronously with reportDataPathEvents(0x33). */
+    if (type == SIOCGA80211 && number == APPLE80211_IOC_PEER_CACHE_MAXIMUM_SIZE &&
+        vif && data && vif->getInterfaceRole() == RTW89_FRONT_ROLE_AIRLINK_OBSERVED) {
+        uint32_t reqVer = 0;
+        memcpy(&reqVer, data, sizeof(reqVer));
+        if (reqVer > APPLE80211_VERSION) return kIOReturnBadArgument;
+        const uint32_t response[2] = { APPLE80211_VERSION, 32u };
+        memcpy(data, response, sizeof(response));
+        setProperty("OwlyNativePeerCacheMaxSizeResult", 32ULL, 32);
+        return kIOReturnSuccess;
+    }
+    if (type == SIOCSA80211 && number == APPLE80211_IOC_PEER_CACHE_CONTROL &&
+        vif && data && _owlyVifLock &&
+        vif->getInterfaceRole() == RTW89_FRONT_ROLE_AIRLINK_OBSERVED) {
+        IOLockLock(_owlyVifLock);
+        const bool ours = !_owlyAWDLStopping && _owlyAttachedAWDL == vif && !_owlyAWDLPendingBSD;
+        IOLockUnlock(_owlyVifLock);
+        if (!ours) return kIOReturnNotReady;
+        uint32_t reqVer = 0, opcode = 0;
+        uint8_t mac[6] = {};
+        memcpy(&reqVer, data, sizeof(reqVer));
+        memcpy(&opcode, static_cast<const uint8_t *>(data) + 4, sizeof(opcode));
+        memcpy(mac, static_cast<const uint8_t *>(data) + 8, sizeof(mac));
+        if (reqVer > APPLE80211_VERSION) return kIOReturnBadArgument;
+        if (opcode == 0 || opcode == 6) {
+            owlyNativeNotePeerCache(mac, 1u);
+            return kIOReturnSuccess;
+        }
+        if (opcode == 2) {
+            owlyNativeNotePeerCache(mac, 3u);
+            return kIOReturnSuccess;
+        }
+        return kIOReturnUnsupported;
+    }
+#endif
     const bool syncRequest =
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
         (type==SIOCSA80211 && (number==APPLE80211_IOC_AWDL_OOB_AUTO_REQUEST ||
@@ -1539,6 +1602,18 @@ SInt32 RTLAirLinkFront::apple80211VirtualRequest(UInt type, int number,
             const SInt32 rc=there && _back.request ?
                 _back.request(_back.ctx,type,number,vif,data) : kIOReturnNotReady;
             backLeave();
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+            /* The backend accepted a unicast MI for transmission. Real Broadcom
+             * firmware answers every such frame with an action-frame TX status
+             * (reportDataPathEvents 0x45). Legacy4C blocks RemoteCamera/RTG
+             * traffic registration for 3 s waiting for it, then fails with EIO.
+             * Layout: u32 version, u8 destination[6] (see MasterIndicationRequest). */
+            if (!rc && type==SIOCSA80211 && number==APPLE80211_IOC_AWDL_OOB_REQUEST) {
+                uint8_t destination[6];
+                memcpy(destination,static_cast<const uint8_t *>(data)+4,sizeof(destination));
+                if (!(destination[0]&1)) owlyNativeNoteUMI(destination);
+            }
+#endif
             if (owly_cfg_known(static_cast<unsigned>(number))) {
                 setProperty("OwlyNativeConfigLastRequest",static_cast<unsigned long long>(number),32);
                 setProperty("OwlyNativeConfigLastType",type==SIOCSA80211 ? 1ULL : 0ULL,32);
@@ -2007,6 +2082,20 @@ SInt32 RTLAirLinkFront::enableVirtualInterface(IO80211VirtualInterface *interfac
     retain();
     IOWorkLoop *loop = _workLoop;
     loop->retain();
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    bool waited = false;
+    if (!loop->inGate()) {
+        IOLockLock(_owlyVifLock);
+        ++_owlyServiceWaiters;
+        waited = true;
+        while (_owlyNativeUsers && _owlyNativeOwnerThread != current_thread() &&
+               !_owlyAWDLStopping) {
+            ++_owlyServiceBusyWaits;
+            IOLockSleep(_owlyVifLock, &_owlyNativeUsers, THREAD_UNINT);
+        }
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     struct Args { IO80211VirtualInterface *vif; SInt32 result; } args = { interface, kIOReturnNotReady };
     const IOReturn rc = loop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
@@ -2015,6 +2104,13 @@ SInt32 RTLAirLinkFront::enableVirtualInterface(IO80211VirtualInterface *interfac
             a->result = self->owlyEnableVirtualInterfaceOnGate(a->vif);
             return kIOReturnSuccess;
         }, this, &args);
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (waited) {
+        IOLockLock(_owlyVifLock);
+        --_owlyServiceWaiters;
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     loop->release();
     owlyFinishDeferredStop();
     release();
@@ -2027,6 +2123,20 @@ SInt32 RTLAirLinkFront::disableVirtualInterface(IO80211VirtualInterface *interfa
     retain();
     IOWorkLoop *loop = _workLoop;
     loop->retain();
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    bool waited = false;
+    if (!loop->inGate()) {
+        IOLockLock(_owlyVifLock);
+        ++_owlyServiceWaiters;
+        waited = true;
+        while (_owlyNativeUsers && _owlyNativeOwnerThread != current_thread() &&
+               !_owlyAWDLStopping) {
+            ++_owlyServiceBusyWaits;
+            IOLockSleep(_owlyVifLock, &_owlyNativeUsers, THREAD_UNINT);
+        }
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     struct Args { IO80211VirtualInterface *vif; SInt32 result; } args = { interface, kIOReturnNotReady };
     const IOReturn rc = loop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
@@ -2035,6 +2145,13 @@ SInt32 RTLAirLinkFront::disableVirtualInterface(IO80211VirtualInterface *interfa
             a->result = self->owlyDisableVirtualInterfaceOnGate(a->vif);
             return kIOReturnSuccess;
         }, this, &args);
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (waited) {
+        IOLockLock(_owlyVifLock);
+        --_owlyServiceWaiters;
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     loop->release();
     owlyFinishDeferredStop();
     release();

@@ -1310,7 +1310,9 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	const u8 *frame = skb->data;
 
 	const bool is_qos = frame[0] == (IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_DATA);
+	const bool is_amsdu = is_qos && skb->len >= 26u && frame[24] == 0x80u && frame[25] == 0u;
 	const size_t hdr_len = is_qos ? 26 : 24;
+	const size_t snap_off = is_amsdu ? hdr_len + 14u : hdr_len;
 
 	/* The native radio submitter allocates a shared software sequence.
 	 * The default management path would replace it using a separate
@@ -1325,6 +1327,10 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    !memcmp(frame + 16, awdl_bssid, sizeof(awdl_bssid))) {
 		desc_info->hw_ssn_sel = 0;
 		desc_info->hw_seq_mode = 0;
+		/* Always keep TXWD MULTIPORT_ID aligned with the AWDL auxiliary
+		 * VIF port (matching CMAC SET_CMC_TBL_MULTI_PORT_ID) for action
+		 * (PSF/MIF), multicast mDNS data, and unicast data frames. */
+		desc_info->port = link->port;
 	}
 
 	if (rtwdev->chip->chip_id != RTL8852B || !tx_req->vif || !tx_req->vif->p2p ||
@@ -1333,18 +1339,19 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    !(info->flags & IEEE80211_TX_INTFL_DONT_ENCRYPT) ||
 	    (info->flags & IEEE80211_TX_CTL_NO_ACK) || desc_info->is_bmc ||
 	    (frame[0] != IEEE80211_FTYPE_DATA && !is_qos) || frame[1] ||
-	    skb->len < hdr_len + 57u ||
-	    (is_qos && (frame[24] != 0 || frame[25] != 0)) ||
+	    skb->len < snap_off + 57u ||
+	    (is_qos && !is_amsdu && (frame[24] != 0 || frame[25] != 0)) ||
 	    memcmp(frame + 10, link->mac_addr, ETH_ALEN) ||
 	    memcmp(frame + 16, awdl_bssid, sizeof(awdl_bssid)) ||
-	    memcmp(frame + hdr_len, awdl_snap, sizeof(awdl_snap)))
+	    (is_amsdu && (memcmp(frame + hdr_len, frame + 4, ETH_ALEN) ||
+			  memcmp(frame + hdr_len + 6, frame + 10, ETH_ALEN))) ||
+	    memcmp(frame + snap_off, awdl_snap, sizeof(awdl_snap)))
 		return;
 
-	if (!tx_req->sta) {
-		/* Keep the fallback port consistent with the VIF's MAC ID. */
-		desc_info->port = link->port;
+	desc_info->port = link->port;
+
+	if (!tx_req->sta)
 		return;
-	}
 
 	const struct rtw89_sta_link *peer = tx_req->rtwsta_link;
 	const struct rtw89_chan *chan = rtw89_chan_get(rtwdev, link->chanctx_idx);
@@ -1352,9 +1359,16 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    peer->ra.macid == desc_info->mac_id && peer->ra.ra_mask &&
 	    peer->ra.bw_cap <= chan->band_width) {
 		/* Let firmware choose the data rate using the AWDL peer's
-		 * negotiated HT/VHT rate table. Keep the raw frame and sequence. */
+		 * negotiated HT/VHT rate table. Keep the raw frame and sequence.
+		 * Keep RTS/CTS off for AWDL NoDS/AD_HOC peers (HW RTS fails
+		 * CTS handshake on large TLS/Discover/A-MPDU frames), while
+		 * keeping 12 HW retries with firmware rate fallback. */
 		desc_info->use_rate = false;
 		desc_info->dis_data_fb = false;
+		desc_info->hw_rts_en = false;
+		desc_info->rts_en = false;
+		desc_info->tx_cnt_lmt_en = true;
+		desc_info->tx_cnt_lmt = 12;
 		if (is_qos && (info->flags & IEEE80211_TX_CTL_AMPDU) &&
 		    test_bit(0, peer->rtwsta->ampdu_map)) {
 			const struct ieee80211_link_sta *lsta = &tx_req->sta->deflink;
@@ -1366,10 +1380,6 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 			desc_info->agg_en = true;
 			desc_info->ampdu_num = (u8)(agg_num - 1u);
 			desc_info->ampdu_density = lsta->ht_cap.ampdu_density;
-			desc_info->hw_rts_en = true;
-			desc_info->rts_en = true;
-			desc_info->tx_cnt_lmt_en = true;
-			desc_info->tx_cnt_lmt = 12;
 		}
 	}
 }
@@ -4704,12 +4714,15 @@ static bool rtw89_core_awdl_data_rx_immediate(const struct rtw89_dev *rtwdev,
 	static const u8 awdl_bssid[] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
 
 	/* A PHY status report need not accompany an 8852B data frame.
-	 * AWDL unicast uses the known peer and RX channel. Release it
-	 * here; action frames still wait for the measured RSSI. */
+	 * AWDL unicast and IPv6 multicast (mDNS 33:33:...) use the known peer
+	 * and RX channel. Release them here; action frames still wait for the
+	 * measured RSSI. */
 	return rtwdev->chip->chip_id == RTL8852B && !rtwdev->scanning &&
 	       desc->frame_type == RTW89_RX_TYPE_DATA && skb->len >= 24 &&
 	       (skb->data[0] == 0x08 || skb->data[0] == 0x88) &&
-	       !(skb->data[1] & 0x43) && !(skb->data[4] & 1) &&
+	       !(skb->data[1] & 0x43) &&
+	       (!(skb->data[4] & 1) ||
+		(skb->data[4] == 0x33 && skb->data[5] == 0x33)) &&
 	       !memcmp(skb->data + 16, awdl_bssid, ETH_ALEN);
 }
 #endif

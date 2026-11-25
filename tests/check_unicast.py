@@ -2,7 +2,7 @@
 """Execute production self-address transaction and synthetic SYN-ACK admission."""
 from pathlib import Path
 import json,os,platform,shutil,subprocess,tempfile
-ROOT=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parents[1]
 def run(source,output,cc=None):
     source,output=Path(source),Path(output);output.mkdir(parents=True,exist_ok=True)
     inc=source/'src/compat_rtw89';cc=cc or shutil.which('cc');sdk=[]

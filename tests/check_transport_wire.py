@@ -2,7 +2,7 @@
 """Exercise actual production election and SCC datapath wire fields."""
 from pathlib import Path
 import json,os,platform,shutil,subprocess,tempfile
-ROOT=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parents[1]
 def run(source,output,cc=None):
     source,output=Path(source),Path(output);output.mkdir(parents=True,exist_ok=True)
     cc=cc or shutil.which('cc');inc=source/'src/compat_rtw89'

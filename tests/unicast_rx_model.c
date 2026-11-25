@@ -140,6 +140,7 @@ static bool published;
 static int cam_result;
 
 static struct ieee80211_hw *glue_hw(void) { return &hw; }
+static void rtw89_btc_ntfy_awdl_chan(struct rtw89_dev *p) { assert(p == &dev); }
 static struct rtw89_m80211_local *hw_to_local(struct ieee80211_hw *p)
 {
     assert(p == &hw);
@@ -267,9 +268,9 @@ static void test_filter(void)
     const u32 blocked = B_AX_A_A1_MATCH | B_AX_A_BC | B_AX_A_MC | B_AX_A_BCN_CHK_EN;
     const u32 cam = B_AX_A_BC_CAM_MATCH | B_AX_A_UC_CAM_MATCH;
     const u32 preserved = BIT(14);
-    /* AWDL No-DS traffic must not require an AP/CAM unicast match.
-     * Keep receiver-address filtering and the station's original cache. */
-    const u32 addressed = preserved | B_AX_A_A1_MATCH;
+    /* Active AWDL clears CAM/A1/UID gates and sets B_AX_A_BC | B_AX_A_MC so
+     * Realtek forwards AWDL broadcast PSF/MIF and multicast mDNS alongside STA. */
+    const u32 addressed = preserved | B_AX_A_BC | B_AX_A_MC;
     const u32 multicast_cam = B_AX_A_MC_LIST_CAM_MATCH;
     const u32 uid = FIELD_PREP(B_AX_UID_FILTER_MASK, 3);
     const u32 max_length = FIELD_PREP(B_AX_RX_MPDU_MAX_LEN_MASK, 32);
@@ -290,8 +291,8 @@ static void test_filter(void)
     assert(owly_scc_filter_reported && register_writes == 1);
     assert(filter_readbacks == 1);
     assert(filter_register[RTW89_MAC_0] == (addressed | max_length));
-    assert(filter_register[RTW89_MAC_0] & B_AX_A_A1_MATCH);
-    assert(!(filter_register[RTW89_MAC_0] & (B_AX_A_UC_CAM_MATCH | B_AX_A_BC_CAM_MATCH |
+    assert((filter_register[RTW89_MAC_0] & (B_AX_A_BC | B_AX_A_MC)) == (B_AX_A_BC | B_AX_A_MC));
+    assert(!(filter_register[RTW89_MAC_0] & (B_AX_A_A1_MATCH | B_AX_A_UC_CAM_MATCH | B_AX_A_BC_CAM_MATCH |
                                          B_AX_UID_FILTER_MASK | B_AX_SNIFFER_MODE)));
     assert(!(filter_register[RTW89_MAC_0] & B_AX_A_CRC32_ERR));
     assert(dev.hal.rx_fltr == station_cache);
@@ -302,7 +303,7 @@ static void test_filter(void)
     dev.scanning = true;
     flags = ax_filters;
     rtw89_ops_configure_filter(&hw, ax_filters, &flags, 0);
-    assert(filter_register[RTW89_MAC_0] == (preserved | max_length));
+    assert(filter_register[RTW89_MAC_0] == (addressed | max_length));
     dev.scanning = false;
     rtw89_mac_set_rx_fltr(&dev, RTW89_MAC_0, initial);
     assert(filter_register[RTW89_MAC_0] == (addressed | max_length));
@@ -316,17 +317,18 @@ static void test_filter(void)
     owly_scc_filter_set(true, 5745);
     assert(filter_calls == 1);
 
-    /* Link notifications can change the AP channel while SCC stays active. */
+    /* Link notifications can change the AP channel while SCC stays active;
+     * each frequency change refreshes the filter and BTC coex notification. */
     owly_scc_filter_set(true, 5220);
-    assert(filter_calls == 1 && filter_register[RTW89_MAC_0] == (addressed | max_length));
-    owly_scc_filter_set(true, 2437);
-    assert(filter_calls == 1 && filter_register[RTW89_MAC_0] == (addressed | max_length));
-    owly_scc_filter_set(true, 5745);
-    assert(filter_calls == 1 && filter_register[RTW89_MAC_0] == (addressed | max_length));
-    owly_scc_filter_set(true, 2412); /* Unsupported AWDL channel restores CAM/UID. */
-    assert(filter_calls == 2 && filter_register[RTW89_MAC_0] == (station_cache | max_length));
+    assert(filter_calls == 2 && filter_register[RTW89_MAC_0] == (addressed | max_length));
     owly_scc_filter_set(true, 2437);
     assert(filter_calls == 3 && filter_register[RTW89_MAC_0] == (addressed | max_length));
+    owly_scc_filter_set(true, 5745);
+    assert(filter_calls == 4 && filter_register[RTW89_MAC_0] == (addressed | max_length));
+    owly_scc_filter_set(true, 2412); /* Unsupported AWDL channel restores CAM/UID. */
+    assert(filter_calls == 5 && filter_register[RTW89_MAC_0] == (station_cache | max_length));
+    owly_scc_filter_set(true, 2437);
+    assert(filter_calls == 6 && filter_register[RTW89_MAC_0] == (addressed | max_length));
     owly_scc_filter_set(false, 0);
     assert(!owly_scc_filter_reported && last_flags == 0);
     assert(filter_register[RTW89_MAC_0] == (initial | max_length));
@@ -383,7 +385,8 @@ static void test_unicast_tx_port(void)
     u8 frame[100] = {0x08};
     struct sk_buff skb = {frame, sizeof(frame)};
     struct ieee80211_tx_info info = {
-        IEEE80211_TX_INTFL_DONT_ENCRYPT | IEEE80211_TX_CTL_REQ_TX_STATUS
+        IEEE80211_TX_INTFL_DONT_ENCRYPT | IEEE80211_TX_CTL_REQ_TX_STATUS |
+        IEEE80211_TX_CTL_INJECTED
     };
     struct rtw89_core_tx_request tx = {
         .vif = &auxiliary, .rtwvif_link = &aux_link, .skb = &skb,
@@ -406,21 +409,29 @@ static void test_unicast_tx_port(void)
     rtw89_core_tx_update_awdl_port(&dev, &tx, &info);
     assert(!tx.desc_info.port);
     tx.vif = &auxiliary;
+    /* Multicast mDNS and NO_ACK AWDL frames on the auxiliary VIF must also use
+     * aux_link.port so CMAC matches Port 1's MAC/BSSID table. */
+    tx.desc_info.port = 0;
     tx.desc_info.is_bmc = true;
     rtw89_core_tx_update_awdl_port(&dev, &tx, &info);
-    assert(!tx.desc_info.port);
+    assert(tx.desc_info.port == aux_link.port);
     tx.desc_info.is_bmc = false;
+    tx.desc_info.port = 0;
     frame[15] ^= 1;
     rtw89_core_tx_update_awdl_port(&dev, &tx, &info);
     assert(!tx.desc_info.port);
     frame[15] ^= 1;
-    skb.len = 24;
+    tx.desc_info.port = 0;
+    skb.len = 23;
     rtw89_core_tx_update_awdl_port(&dev, &tx, &info);
     assert(!tx.desc_info.port);
     skb.len = sizeof(frame);
+    tx.desc_info.port = 0;
     info.flags |= IEEE80211_TX_CTL_NO_ACK;
     rtw89_core_tx_update_awdl_port(&dev, &tx, &info);
-    assert(rtw89_build_txwd_info0(&tx.desc_info) == old_txwd);
+    assert(tx.desc_info.port == aux_link.port);
+    assert(rtw89_build_txwd_info0(&tx.desc_info) ==
+           (old_txwd | FIELD_PREP(RTW89_TXWD_INFO0_MULTIPORT_ID, aux_link.port)));
 }
 
 static void test_native_management_sequence(void)
@@ -431,13 +442,14 @@ static void test_native_management_sequence(void)
     struct rtw89_core_tx_request tx={.vif=&auxiliary,.rtwvif_link=&aux_link,.skb=&skb,
         .desc_info={.hw_seq_mode=1,.hw_ssn_sel=1}};
     rtw89_core_tx_update_awdl_port(&dev,&tx,&info);
-    assert(tx.desc_info.hw_seq_mode==0 && tx.desc_info.hw_ssn_sel==0);
-    tx.desc_info.hw_seq_mode=tx.desc_info.hw_ssn_sel=1;tx.vif=&primary;
+    assert(tx.desc_info.hw_seq_mode==0 && tx.desc_info.hw_ssn_sel==0 &&
+           tx.desc_info.port==aux_link.port);
+    tx.desc_info.hw_seq_mode=tx.desc_info.hw_ssn_sel=1;tx.desc_info.port=0;tx.vif=&primary;
     rtw89_core_tx_update_awdl_port(&dev,&tx,&info);
-    assert(tx.desc_info.hw_seq_mode==1 && tx.desc_info.hw_ssn_sel==1);
+    assert(tx.desc_info.hw_seq_mode==1 && tx.desc_info.hw_ssn_sel==1 && !tx.desc_info.port);
     tx.vif=&auxiliary;f[15]^=1;
     rtw89_core_tx_update_awdl_port(&dev,&tx,&info);
-    assert(tx.desc_info.hw_seq_mode==1 && tx.desc_info.hw_ssn_sel==1);
+    assert(tx.desc_info.hw_seq_mode==1 && tx.desc_info.hw_ssn_sel==1 && !tx.desc_info.port);
 }
 
 static void test_unicast_ppdu_bypass(void)
@@ -452,9 +464,15 @@ static void test_unicast_ppdu_bypass(void)
     frame[1]=0x40;
     assert(!rtw89_core_awdl_data_rx_immediate(&dev,&desc,&skb));
     frame[1]=0;
-    frame[4]=0x33;
+    /* IPv6 multicast (mDNS 33:33:...) bypasses PPDU status parking; other
+     * multicast/broadcast addresses remain parked. */
+    frame[4]=0x33;frame[5]=0x33;
+    assert(rtw89_core_awdl_data_rx_immediate(&dev,&desc,&skb));
+    frame[4]=0xff;frame[5]=0xff;
     assert(!rtw89_core_awdl_data_rx_immediate(&dev,&desc,&skb));
-    frame[4]=0x02;
+    frame[4]=0x01;frame[5]=0x00;
+    assert(!rtw89_core_awdl_data_rx_immediate(&dev,&desc,&skb));
+    frame[4]=0x02;frame[5]=0x00;
     dev.scanning=true;
     assert(!rtw89_core_awdl_data_rx_immediate(&dev,&desc,&skb));
     dev.scanning=false;

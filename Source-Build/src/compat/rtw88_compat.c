@@ -627,7 +627,11 @@ void rtw88_netif_napi_add(struct net_device *dev, struct napi_struct *napi,
     if (!napi) return;
     napi->dev = dev;
     napi->poll = poll_fn;
+#ifdef RTW89_MACOS
+    napi->weight = 128;
+#else
     napi->weight = 64;
+#endif
     napi->enabled = false;
     INIT_WORK(&napi->work, rtw88_napi_work_fn);
 }

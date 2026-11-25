@@ -237,11 +237,23 @@ extern "C" int owly_peer_awdl_enable(void *){    assert(!activeFront->_workLoop-
     }
     if(!awdlResult && resetGenerationOnEnable)++activeFront->testWindow.generation;
     return awdlResult;}
+static std::vector<unsigned> eventCodes;
+static std::vector<std::vector<uint8_t>> peerCacheEvents,umiEvents;
 extern "C" void owly_peer_window(void *,unsigned code,void *data,unsigned long n){
-    assert(code==41 && n==36 && activeFront->_workLoop->inGate());
-    lastWindow.assign(static_cast<uint8_t *>(data),static_cast<uint8_t *>(data)+n);
-    uint32_t state;memcpy(&state,lastWindow.data()+4,4);
-    memcpy(reinterpret_cast<uint8_t *>(modelNativePeer)+OWLY_NATIVE_PEER_SYNC_STATE_OFFSET,&state,4);
+    assert(activeFront->_workLoop->inGate());
+    eventCodes.push_back(code);
+    if(code==41) {
+        assert(n==36);
+        lastWindow.assign(static_cast<uint8_t *>(data),static_cast<uint8_t *>(data)+n);
+        uint32_t state;memcpy(&state,lastWindow.data()+4,4);
+        memcpy(reinterpret_cast<uint8_t *>(modelNativePeer)+OWLY_NATIVE_PEER_SYNC_STATE_OFFSET,&state,4);
+    } else if(code==0x33) {
+        assert(n==0x1d0);
+        peerCacheEvents.emplace_back(static_cast<uint8_t *>(data),static_cast<uint8_t *>(data)+n);
+    } else if(code==0x45) {
+        assert(n==64);
+        umiEvents.emplace_back(static_cast<uint8_t *>(data),static_cast<uint8_t *>(data)+n);
+    } else assert(false);
 }
 
 static unsigned checks;
@@ -398,6 +410,12 @@ static void readiness_and_ownership() {
     f.front.verified=true;f.tick();CHECK(f.front._owlyNativeEnabled && enableCalls==before+1);CHECK(bufout[0x200]==0xaa && bufout[0x410]==0xaa);
     auto pkt=actionPacket();unsigned a=allocations,b=frees;
     CHECK(f.front.owlyNativeReceive(&pkt));CHECK(allocations==a+1 && frees==b+1);
+    /* A pending SET120 service ioctl waiter must make owlyNativeAcquire yield
+     * immediately so wifip2pd never hits ENXIO against 16 ms ticks or RX. */
+    f.front._owlyServiceWaiters=1;
+    CHECK(!f.front.owlyNativeReceive(&pkt));
+    f.front._owlyServiceWaiters=0;
+    CHECK(f.front.owlyNativeReceive(&pkt));
     CHECK(lastBody.size()==pkt.length-24 && !memcmp(lastBody.data(),pkt.bytes+24,lastBody.size()));
     int32_t rssi;memcpy(&rssi,lastMetadata.data()+44,4);CHECK(rssi==-45);
     uint32_t ch;memcpy(&ch,lastMetadata.data()+16,4);CHECK(ch==149);
@@ -513,10 +531,41 @@ static void drain_before_stop() {
     {std::lock_guard<std::mutex> lock(actionMutex);blockAction=true;enteredAction=releaseAction=false;}
     std::thread rx([&]{CHECK(f.front.owlyNativeReceive(&pkt));});
     {std::unique_lock<std::mutex> lock(actionMutex);actionCondition.wait(lock,[]{return enteredAction;});}
+    /* IPv6 data RX must not be dropped while an Action call or tick holds _owlyVifMethodBusy. */
+    auto ipv6=pkt;ipv6.kind=OWLY_ABI6_PACKET_IPV6;ipv6.length=48;memset(ipv6.bytes,0,48);
+    ipv6.bytes[0]=0x60;ipv6.bytes[5]=8;
+    const unsigned beforeData=dataCalls.load();
+    CHECK(f.front.owlyNativeReceive(&ipv6));
+    CHECK(dataCalls.load()==beforeData+1 && f.front._owlyNativeDataUsers==0);
     std::atomic<bool> finished{false};std::thread stop([&]{f.front.owlyNativeStop();finished=true;});
     std::this_thread::sleep_for(std::chrono::milliseconds(10));CHECK(!finished);
     {std::lock_guard<std::mutex> lock(actionMutex);releaseAction=true;actionCondition.notify_all();}
-    rx.join();stop.join();CHECK(finished && f.front._owlyNativeUsers==0);
+    rx.join();stop.join();CHECK(finished && f.front._owlyNativeUsers==0 && f.front._owlyNativeDataUsers==0);
     blockAction=false;
 }
-int main(){native_registration_uses_exact_native_lookup();native_registration_repairs_only_processed_remote_frames();native_registration_failure_and_backoff_are_not_admission();native_registration_respects_rssi_validation_identity_and_stop();zero_length_action_allocation();current_vif_peer_rebinding();native_processing_is_not_call_success();native_gate_recovery();native_recovery_backoff();readiness_and_ownership();reentrant_stop();window_and_corrupt_guard();legacy_window_channel_and_time();native_programming_results();session_epoch_commit_and_reenable();drain_before_stop();CHECK(allocations==frees);printf("native frontend production runtime: %u checks passed; mocked kernel boundaries\n",checks);}
+static void peer_cache_and_umi_indications() {
+    eventCodes.clear();peerCacheEvents.clear();umiEvents.clear();
+    Fixture f;f.front.verified=true;
+    const uint8_t peerMac[6]={0x42,0x73,0x3d,0xb9,0x2c,0x97};
+    const int refsBefore=f.front.references.load();
+    /* Tick is already pending from capture(); expediting must not double-retain. */
+    f.front.owlyNativeNotePeerCache(peerMac,1u);
+    f.front.owlyNativeNotePeerCache(peerMac,3u);
+    f.front.owlyNativeNoteUMI(peerMac);
+    CHECK(f.front.references.load()==refsBefore);
+    f.tick();
+    CHECK(f.front._owlyPeerCacheNoted==2 && f.front._owlyPeerCacheReported==2 && f.front._owlyPeerCacheDropped==0);
+    CHECK(f.front._owlyUmiNoted==1 && f.front._owlyUmiReported==1 && f.front._owlyUmiDropped==0);
+    CHECK(peerCacheEvents.size()==2 && umiEvents.size()==1);
+    CHECK(eventCodes.size()==4 && eventCodes[0]==0x33 && eventCodes[1]==0x33 && eventCodes[2]==0x45 && eventCodes[3]==41);
+    uint32_t v0=0,op0=0,v1=0,op1=0;
+    memcpy(&v0,peerCacheEvents[0].data(),4);memcpy(&op0,peerCacheEvents[0].data()+4,4);
+    memcpy(&v1,peerCacheEvents[1].data(),4);memcpy(&op1,peerCacheEvents[1].data()+4,4);
+    CHECK(v0==1 && op0==1 && !memcmp(peerCacheEvents[0].data()+8,peerMac,6));
+    CHECK(v1==1 && op1==3 && !memcmp(peerCacheEvents[1].data()+8,peerMac,6));
+    CHECK(!memcmp(umiEvents[0].data(),peerMac,6) && umiEvents[0][6]==0);
+    /* Ring overflow drops safely without out-of-bounds writes. */
+    for(unsigned i=0;i<18;i++)f.front.owlyNativeNotePeerCache(peerMac,1u);
+    CHECK(f.front._owlyPeerCacheDropped==2 && f.front._owlyPeerCacheCount==16);
+}
+int main(){native_registration_uses_exact_native_lookup();native_registration_repairs_only_processed_remote_frames();native_registration_failure_and_backoff_are_not_admission();native_registration_respects_rssi_validation_identity_and_stop();zero_length_action_allocation();current_vif_peer_rebinding();native_processing_is_not_call_success();native_gate_recovery();native_recovery_backoff();readiness_and_ownership();reentrant_stop();window_and_corrupt_guard();legacy_window_channel_and_time();native_programming_results();session_epoch_commit_and_reenable();drain_before_stop();peer_cache_and_umi_indications();CHECK(allocations==frees);printf("native frontend production runtime: %u checks passed; mocked kernel boundaries\n",checks);}

@@ -8528,7 +8528,21 @@ void _run_coex(struct rtw89_dev *rtwdev, enum btc_reason_and_action reason)
 	}
 
 	if (mode == BTC_WLINK_NOLINK) {
+#if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+		if (rtwdev->hal.owly_awdl_scc_rx) {
+			const struct rtw89_chan *chan =
+				rtw89_chan_get(rtwdev, RTW89_CHANCTX_0);
+
+			if (chan->band_type == RTW89_BAND_5G)
+				mode_v0 = BTC_WLINK_V0_5G;
+			else
+				mode_v0 = BTC_WLINK_V0_OTHER;
+		} else {
+			mode_v0 = BTC_WLINK_V0_NOLINK;
+		}
+#else
 		mode_v0 = BTC_WLINK_V0_NOLINK;
+#endif
 	} else if (btc->dm.tdd_bind.rf_band == BIT(RTW89_BAND_5G)) {
 		mode_v0 = BTC_WLINK_V0_5G;
 	} else if (btc->dm.tdd_bind.rf_band & BIT(RTW89_BAND_5G) &&
@@ -13368,3 +13382,16 @@ void rtw89_btc_ntfy_conn_rfk(struct rtw89_dev *rtwdev, bool state)
 	rtwdev->btc.cx.wl.rfk_info.con_rfk = state;
 }
 EXPORT_SYMBOL(rtw89_btc_ntfy_conn_rfk);
+
+void rtw89_btc_ntfy_awdl_chan(struct rtw89_dev *rtwdev)
+{
+	struct rtw89_btc_wl_info *wl = &rtwdev->btc.cx.wl;
+
+	lockdep_assert_wiphy(rtwdev->hw->wiphy);
+
+	if (!wl->status.map.init_ok ||
+	    wl->role_info.link_mode != BTC_WLINK_NOLINK)
+		return;
+
+	_run_coex(rtwdev, BTC_RSN_NTFY_ROLE_INFO);
+}

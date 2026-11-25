@@ -52,7 +52,7 @@ struct ieee80211_tx_info {
  u32 flags; unsigned band,hw_queue;
  struct { struct { s8 idx; unsigned count; u32 flags; } rates[4]; struct ieee80211_vif *vif; } control;
 };
-struct sk_buff { u8 bytes[4096],*data; size_t len; unsigned priority,mapping; struct ieee80211_tx_info info; };
+struct sk_buff { u8 bytes[6144],*data; size_t len; unsigned priority,mapping; struct ieee80211_tx_info info; };
 #define IEEE80211_SKB_CB(skb) (&(skb)->info)
 struct rtw89_addr_cam_entry { bool valid; };
 struct rtw89_vif_link {
@@ -104,7 +104,7 @@ static struct { bool scanning; } glue;
 static unsigned checks,failures,hooks,submissions,kicks,frees;
 static unsigned last_priority,last_mapping,last_hw_queue;
 static struct rtw89_tx_desc_info last_desc;
-static u8 sent[2048]; static size_t sent_len;
+static u8 sent[6144]; static size_t sent_len;
 static bool alloc_fail; static int submit_result;
 #define CHECK(c) do { ++checks; if(!(c)) { ++failures; fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#c); } } while(0)
 static struct ieee80211_hw *glue_hw(void) { return &hw; }
@@ -189,6 +189,7 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  const u32 word=rtw89_build_txwd_info0(&last_desc);
  CHECK(!FIELD_GET(RTW89_TXWD_INFO0_USE_RATE,word));
  CHECK(!FIELD_GET(RTW89_TXWD_INFO0_DISDATAFB,word));
+ CHECK(!last_desc.hw_rts_en && !last_desc.rts_en && last_desc.tx_cnt_lmt_en && last_desc.tx_cnt_lmt==12 && last_desc.port==link.port);
  CHECK(last_desc.data_retry_lowest_rate==RTW89_HW_RATE_OFDM6);
  CHECK(hooks==0 && !last_desc.agg_en && last_desc.mac_id==rate_link.mac_id);
  CHECK(!last_desc.hw_seq_mode && !last_desc.hw_ssn_sel);
@@ -221,8 +222,20 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  CHECK(doorbell==IEEE80211_AC_BE);
  CHECK(!last_desc.use_rate && !last_desc.dis_data_fb);
  CHECK(last_desc.agg_en && last_desc.ampdu_num==63 && last_desc.ampdu_density==5);
- CHECK(last_desc.hw_rts_en && last_desc.rts_en && last_desc.tx_cnt_lmt==12);
+ CHECK(!last_desc.hw_rts_en && !last_desc.rts_en && last_desc.tx_cnt_lmt==12 && last_desc.port==link.port);
  CHECK(!last_desc.hw_seq_mode && !last_desc.hw_ssn_sel && last_desc.seq==0x123);
+ /* Verify QoS A-MSDU inside A-MPDU (>2048B) keeps VHT RA + A-MPDU + AWDL port. */
+ struct sk_buff am=frame(IEEE80211_FTYPE_DATA|IEEE80211_STYPE_QOS_DATA,flags);
+ am.bytes[24]=0x80;am.bytes[25]=0;
+ memcpy(am.bytes+26,am.bytes+4,6);memcpy(am.bytes+32,am.bytes+10,6);
+ am.bytes[38]=0x05;am.bytes[39]=0xdc;
+ memcpy(am.bytes+40,snap,sizeof(snap));
+ am.len=3056;
+ doorbell=-1;
+ CHECK(owly_sync_write_frame(ch,am.bytes,am.len,true,true,&doorbell)==0);
+ CHECK(doorbell==IEEE80211_AC_BE);
+ CHECK(!last_desc.use_rate && !last_desc.dis_data_fb);
+ CHECK(last_desc.agg_en && last_desc.ampdu_num==63 && last_desc.ampdu_density==5 && last_desc.port==link.port);
  dev.channel.band_width=RTW89_CHANNEL_WIDTH_20;
  rate_link.ra.bw_cap=RTW89_CHANNEL_WIDTH_20;
  rate_peer.ampdu_map[0]=0;
@@ -237,11 +250,11 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  peer_present=true;
  s.bytes[4]|=1;
  CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
- CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_desc.no_ack);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_desc.no_ack && last_desc.port==link.port);
  s.bytes[4]&=~1u;
  s.bytes[0]=0xd0;
  CHECK(owly_sync_submit(ch,s.bytes,s.len,false)==0);
- CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_mapping==IEEE80211_AC_VO);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_mapping==IEEE80211_AC_VO && last_desc.port==link.port);
 }
 #endif
 
@@ -256,7 +269,7 @@ int main(void)
  struct sk_buff s=frame(8,injected|IEEE80211_TX_CTL_REQ_TX_STATUS);u8 original[108];memcpy(original,s.bytes,108);
  CHECK(owly_sync_submit(&ch,s.bytes,108,true)==0);
  CHECK(last_priority==0);CHECK(last_mapping==IEEE80211_AC_BE);CHECK(last_hw_queue==42);
- CHECK(last_desc.report);CHECK(last_desc.tx_cnt_lmt_en && last_desc.tx_cnt_lmt==3);
+ CHECK(last_desc.report);CHECK(last_desc.tx_cnt_lmt_en && last_desc.tx_cnt_lmt==12);
  CHECK(sent_len==108 && !memcmp(sent,original,108));CHECK(hooks==0);CHECK(!last_desc.agg_en);
  s=frame(0xd0,injected);memcpy(original,s.bytes,108);
  CHECK(owly_sync_submit(&ch,s.bytes,108,false)==0);

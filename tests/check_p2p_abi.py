@@ -2,7 +2,7 @@
 """Check the actual compiled P2P vtable against the exact Legacy4C image."""
 from pathlib import Path
 import hashlib,json,re,struct
-ROOT=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parents[1]
 VTABLE='__ZTV22OwlyNativeP2PInterface'
 
 def table(path):

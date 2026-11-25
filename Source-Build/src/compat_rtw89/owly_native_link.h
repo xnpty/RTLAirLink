@@ -9,9 +9,15 @@
  * A peer here is observed link-layer state, not authenticated AirDrop identity.
  * Host RX time gives software timing; it is not a hardware TSF measurement. */
 #define OWLY_LINK_PEERS 8u
+#if defined(RTW89_MACOS)
+#define OWLY_LINK_QUEUE 4096u
+#else
 #define OWLY_LINK_QUEUE 512u
+#endif
 #define OWLY_LINK_QUEUE_WORDS ((OWLY_LINK_QUEUE + 63u) / 64u)
 #define OWLY_LINK_FRAME_MAX 2048u
+#define OWLY_LINK_AMSDU_MAX 5120u
+#define OWLY_LINK_AMSDU_SUBFRAMES 3u
 #define OWLY_LINK_PEER_TTL_US 2000000ull
 #define OWLY_LINK_AW_US 16384ull
 struct owly_link_peer {
@@ -67,6 +73,7 @@ struct owly_link_window {
     bool has_master_election;
     uint8_t master_election[20];
     uint64_t actions, data_rx_admitted, tx_enqueued, tx_handoffs, tx_refused, tx_expired, tx_radio_acked;
+    uint64_t tx_refused_full, tx_refused_no_peer, tx_refused_other;
     unsigned peers, queued;
 };
 struct owly_native_link {
@@ -82,6 +89,7 @@ struct owly_native_link {
     uint64_t queue_used[OWLY_LINK_QUEUE_WORDS];
     uint64_t actions, rejected_actions, data_rx_admitted, data_rx_rejected;
     uint64_t tx_enqueued, tx_handoffs, tx_refused, tx_expired, tx_radio_acked;
+    uint64_t tx_refused_full, tx_refused_no_peer, tx_refused_other;
     /* Why a peer's clock was or was not taken: diagnostics only. */
     uint64_t clock_not_root, clock_no_countdown, clock_outlier, clock_reset, clock_ok;
 };
@@ -141,6 +149,25 @@ int owly_link_next_tx(struct owly_native_link *s,uint64_t now,bool first_mif_sub
                       uint8_t *out,size_t cap,size_t *len,unsigned *offset,
                       uint64_t *generation);
 void owly_link_tx_result(struct owly_native_link *s,unsigned offset,uint64_t generation,int result);
+/* Operational TX QoS/A-MSDU state passed into owly_link_next_tx_batch. */
+struct owly_link_tx_qos_peer {
+    uint8_t mac[6];
+    uint16_t qos_sn;
+    uint16_t max_amsdu;
+    uint8_t max_subframes;
+    bool valid;
+};
+/* Select one ready frame, or aggregate up to max_subframes contiguous unicast
+ * frames to the same QoS/A-MSDU peer into a single standard 802.11 QoS A-MSDU
+ * MPDU (zero memmove for single-MSDU QoS too). Commit or keep on transient
+ * error with owly_link_tx_result_batch(). */
+int owly_link_next_tx_batch(struct owly_native_link *s,uint64_t now,bool first_mif_submitted,
+                            const struct owly_link_tx_qos_peer *qos_peers,unsigned n_qos_peers,
+                            uint8_t *out,size_t cap,size_t *len,unsigned *offset,
+                            uint64_t *generation,unsigned *count_out,bool *is_qos_out,
+                            bool *is_amsdu_out);
+void owly_link_tx_result_batch(struct owly_native_link *s,unsigned offset,
+                               uint64_t generation,unsigned count,int result);
 void owly_link_prefer(struct owly_native_link *s,const uint8_t master[6]);
 /* Idle radio policy: follow the most common channel of a real fresh root;
  * otherwise return the discovery channel. The caller validates RF limits. */

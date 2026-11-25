@@ -3,7 +3,7 @@
 import json,os,platform,shutil,subprocess,tempfile
 from pathlib import Path
 from check_vif_restore import extract_function
-ROOT=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parents[1]
 def run(source,output,cc=None):
     source=Path(source);output=Path(output);output.mkdir(parents=True,exist_ok=True)
     inc=source/'src/compat_rtw89';compiler=cc or shutil.which('cc')

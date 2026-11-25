@@ -596,6 +596,8 @@ kext: $(KEXT_DEPS) $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 	@python3 tools/check_kpi.py $(KEXT_BUNDLE)
 	@cc -O2 -Wall -o $(BUILD_DIR)/out/rtlairlinkctl tools/rtlairlinkctl.c -framework IOKit -framework CoreFoundation
 	@echo "  TOOL $(BUILD_DIR)/out/rtlairlinkctl"
+	@cc -O2 -Wall -Wextra -Werror -o $(BUILD_DIR)/out/rtlairlink-rtgd tools/rtlairlink_rtgd.c -framework IOKit -framework CoreFoundation
+	@echo "  TOOL $(BUILD_DIR)/out/rtlairlink-rtgd"
 
 # Realtek's firmware for each chip, the newest format its driver takes, and
 # Realtek's terms for redistributing it; linux-firmware at a fixed commit.

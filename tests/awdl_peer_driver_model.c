@@ -53,11 +53,16 @@ static void spin_lock(spinlock_t *l){assert(!*l);*l=1;}
 static void spin_unlock(spinlock_t *l){assert(*l);*l=0;}
 static void spin_lock_destroy(spinlock_t *l){assert(!*l);}
 struct work_struct {void (*func)(struct work_struct *);bool pending;};
+struct delayed_work {struct work_struct work;};
 struct workqueue_struct {unsigned unused;};
 static struct workqueue_struct receive_queue;
 #define INIT_WORK(w,f) do {(w)->func=(f);(w)->pending=false;} while(0)
+#define INIT_DELAYED_WORK(w,f) INIT_WORK(&(w)->work,(f))
+static unsigned usecs_to_jiffies(unsigned us){return us;}
 static bool queue_work(struct workqueue_struct *q,struct work_struct *w){assert(q==&receive_queue);w->pending=true;return true;}
+static bool queue_delayed_work(struct workqueue_struct *q,struct delayed_work *w,unsigned d){(void)d;return queue_work(q,&w->work);}
 static bool cancel_work_sync(struct work_struct *w){w->pending=false;return true;}
+static bool cancel_delayed_work_sync(struct delayed_work *w){return cancel_work_sync(&w->work);}
 struct list_head {struct list_head *next,*prev;};
 #define INIT_LIST_HEAD(h) ((h)->next=(h)->prev=(h))
 static bool list_empty(struct list_head *h){return h->next==h;}
@@ -77,6 +82,7 @@ struct rtw89_sta_link {
     struct {unsigned addr_cam_idx;} addr_cam;
     bool ra_configured;
     uint8_t owly_awdl_action_rssi;
+    struct {u32 bit_rate; bool might_fallback_legacy;} ra_report;
 };
 struct rtw89_sta {bool owly_awdl;struct rtw89_sta_link *links[1];struct rtw89_sta_link link;struct rtw89_ba_cam_entry entries[16];};
 struct ieee80211_sta {
@@ -150,7 +156,7 @@ static const struct {int (*sta_state)(struct ieee80211_hw *,struct ieee80211_vif
 struct rtw89_m80211_local {__typeof__(&ops) ops;};static struct rtw89_m80211_local local={&ops};
 static struct rtw89_m80211_local *hw_to_local(struct ieee80211_hw *h){assert(h==&hardware);return &local;}
 static int rtw89_fw_h2c_ba_cam(struct rtw89_dev *d,struct rtw89_vif_link *v,struct rtw89_sta_link *sl,bool start,struct ieee80211_ampdu_params *a)
-{assert(d==&device && v==sl->rtwvif_link && !rx_context && a->tid<16 && !a->amsdu);
+{assert(d==&device && v==sl->rtwvif_link && !rx_context && a->tid<16);
  struct rtw89_sta *s=&a->sta->private;struct rtw89_ba_cam_entry *e=&s->entries[a->tid];
  if(start){++fw_starts;if(!no_entry){e->tid=a->tid;list_add_tail(&e->list,&sl->ba_cam_list);}
   if(leave_window_during_h2c){current+=20000;window_open=false;}return fw_result;}
@@ -249,6 +255,63 @@ static void dynamic_fallback(void){
  assert(owly_ba_le16(last_response+27)==37 && !p->ba_map && fw_stops>stopped);
  owly_peer_close_all();assert(allocated==freed && packet_alloc==packet_free);
 }
+static void tx_amsdu_and_idle_ba(void)
+{
+    reset();
+    struct owly_link_peer *observed = &owly_link_state.peers[0];
+    observed->ht_rx_mcs = 0xffffu;
+    observed->ht_cap_info = 0x09efu;
+    observed->max_channel_width = 80u;
+    observed->has_vht_cap = true;
+    observed->vht_cap_info = 0x038001b1u; /* max MPDU 7991 */
+    observed->vht_rx_mcs_map = 0xfffa;
+    open_peer();
+    struct owly_awdl_radio_peer *p = owly_peer_find(remote);
+    assert(p && p->sta);
+    /* Simulate operational TX BA with A-MSDU enabled. */
+    p->tx_ba_state = OWLY_TX_BA_OPERATIONAL;
+    p->tx_ba_buf_size = 64;
+    p->tx_ba_amsdu = true;
+    p->tx_ba_amsdu_max = 4900u;
+    p->tx_qos_sn = 42u;
+    p->tx_last_unicast_us = current;
+
+    struct owly_link_tx_qos_peer q[OWLY_RADIO_PEERS];
+    /* Initial bit_rate=0 uses full 4900 / 3 subframes. */
+    assert(owly_peer_fill_tx_qos(q) == 1 && q[0].max_amsdu == 4900u && q[0].max_subframes == 3u && q[0].qos_sn == 42u);
+    /* High rate (866.7 Mbps) keeps 4900 / 3 subframes. */
+    p->sta->private.link.ra_report.bit_rate = 8667u;
+    assert(owly_peer_fill_tx_qos(q) == 1 && q[0].max_amsdu == 4900u && q[0].max_subframes == 3u);
+    /* Medium rate (520 Mbps) caps to 3500 / 2 subframes. */
+    p->sta->private.link.ra_report.bit_rate = 5200u;
+    assert(owly_peer_fill_tx_qos(q) == 1 && q[0].max_amsdu == 3500u && q[0].max_subframes == 2u);
+    /* Low rate (200 Mbps) disables TX A-MSDU (single-MSDU QoS). */
+    p->sta->private.link.ra_report.bit_rate = 2000u;
+    assert(owly_peer_fill_tx_qos(q) == 1 && q[0].max_amsdu == 0u && q[0].max_subframes == 1u);
+    /* Legacy fallback also disables TX A-MSDU even at high bit_rate. */
+    p->sta->private.link.ra_report.bit_rate = 8667u;
+    p->sta->private.link.ra_report.might_fallback_legacy = true;
+    assert(owly_peer_fill_tx_qos(q) == 1 && q[0].max_amsdu == 0u && q[0].max_subframes == 1u);
+    p->sta->private.link.ra_report.might_fallback_legacy = false;
+
+    uint8_t ba_st = 0; bool ba_amsdu = false, fb = false; uint16_t mbps = 0;
+    owly_peer_tx_diag(&ba_st, &ba_amsdu, &fb, &mbps);
+    assert(ba_st == OWLY_TX_BA_OPERATIONAL && ba_amsdu && !fb && mbps == 866u);
+
+    /* 6 unACKed initial A-MSDUs trigger permanent fallback until next ADDBA. */
+    for (unsigned k = 0; k < 6u; ++k) owly_peer_tx_amsdu_note(false);
+    assert(owly_peer_fill_tx_qos(q) == 1 && q[0].max_amsdu == 0u && q[0].max_subframes == 1u);
+    owly_peer_tx_diag(&ba_st, &ba_amsdu, &fb, &mbps);
+    assert(fb);
+
+    /* >10s idle expires operational TX BA inside owly_peer_tick(). */
+    current += 10000001ull;
+    observed->last_rx_us = current;
+    owly_peer_tick(&channel);
+    assert(p->tx_ba_state == OWLY_TX_BA_NONE && !p->tx_ba_amsdu && owly_peer_fill_tx_qos(q) == 0);
+    owly_peer_close_all();
+    assert(allocated == freed && packet_alloc == packet_free);
+}
 int main(int argc,char **argv){
  if(argc==2){
   if(!strcmp(argv[1],"late-reply"))late_control_reply();
@@ -299,6 +362,6 @@ int main(int argc,char **argv){
  reset();open_peer();receive(request(56,0));owly_peer_tick(&channel);
  rx_context=true;for(unsigned sn=100;sn<100u+OWLY_PEER_READY_SIZE+13u;sn++)assert(owly_peer_data_rx(qos(sn,0)));rx_context=false;
  assert(owly_peer_ready_count==OWLY_PEER_READY_SIZE);owly_peer_close_all();drain();assert(packet_alloc==packet_free && allocated==freed);
- late_control_reply();dynamic_fallback();action_rssi();
+ late_control_reply();dynamic_fallback();action_rssi();tx_amsdu_and_idle_ba();
  puts("production peer glue: RSSI seeding and expiry, deferred RX, scan/window/H2C errors, duplicate retries, reorder/BAR and teardown passed (firmware mocked)");
 }

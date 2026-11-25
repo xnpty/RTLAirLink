@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# Added 2026-11-21 for RTLAirLink 0.2.0.
-"""Install the verified RTLAirLink cohort into an existing OpenCore EFI."""
+# Updated 2026-11-25 for RTLAirLink 0.4.0.
+"""Install or update RTLAirLink 0.4.0 and its required kexts into an OpenCore EFI."""
 import argparse
 from datetime import datetime
 from functools import partial
@@ -20,7 +20,7 @@ import zipfile
 
 from download_dependencies import LOCK, ROOT, dependency_entries, fetch, sha, unpack_bundle
 
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 DRIVER = 'RTLAirLink.kext'
 FRONT = f'{DRIVER}/Contents/PlugIns/RTLAirLinkFront.kext'
 BRIDGE = 'RTLAirBridge.kext'
@@ -39,11 +39,19 @@ RELEASE_IDS = {
     FRONT: 'io.github.xnpty.RTLAirLink.front',
     BRIDGE: 'io.github.xnpty.RTLAirLink.bridge',
 }
-# Bundle IDs recognize pre-0.2.0 installations under any directory name.
-MIGRATION_IDS = {'com.rtw89.driver', 'com.rtw89.front', 'com.owly.airlink.eventbridge'}
-LEGACY_COMPANION_ID = 'org.franciumos.BroadTek'
-REMOVED_BOOT_ARGS = {'-owlyeb1', '-owlyeb1off', 'owlyebstage'}
+# Bundle IDs recognized when migrating from pre-0.2.0 or AirPort_RTW89 setups.
+MIGRATION_IDS = {
+    'com.rtw89.driver',
+    'com.rtw89.front',
+    'com.owly.airlink.eventbridge',
+    'org.franciumos.AirPort_RTW89',
+    'org.franciumos.AirPortRTW89',
+    'org.franciumos.AirPort_RTW89.front',
+    'org.franciumos.BroadTek',
+}
+REMOVED_BOOT_ARGS = {'-owlyeb1', '-owlyeb1off', 'owlyebstage', '-broadtekp2poff'}
 BOOT_ARGS = ('-amfipassbeta',)
+BLUETOOTH_BOOT_ARGS = ('-btlfxallowanyaddr',)
 OPENCORE_MOD_KEYS = (
     ('ACPI', 'Quirks', 'EnableForAll'),
     ('Booter', 'Quirks', 'EnableForAll'),
@@ -91,20 +99,45 @@ def digest_tree(directory):
             if p.is_file() and not p.name.startswith('._')}
 
 
+def copy_clean_bundle(src, dst):
+    shutil.copytree(src, dst, ignore=shutil.ignore_patterns('._*', '.DS_Store'))
+
+
+def package_kext(package, name):
+    """Locate a kext bundle inside the release package (Kexts/, Kexts-Bluetooth/, or root)."""
+    rel = PurePosixPath(name)
+    for subdir in ('Kexts', 'Kexts-Bluetooth', ''):
+        candidate = (package / subdir / rel) if subdir else (package / rel)
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def validate_package(package):
     manifest = json.loads((package / 'RELEASE_MANIFEST.json').read_text())
     require(manifest['release_version'] == VERSION, 'Package version does not match this installer')
     for name, expected in RELEASE_IDS.items():
-        bundle = package / name
+        bundle = package_kext(package, name)
+        require(bundle is not None, f'Missing {name} in release package')
         info = bundle_info(bundle)
         require(info['CFBundleIdentifier'] == expected, f'Unexpected bundle ID for {name}')
         require(info['CFBundleVersion'] == VERSION, f'Unexpected module version for {name}')
         image = executable_path(bundle, info)
         require(sha(image) == manifest['cohort'][name]['sha256'], f'Checksum mismatch for {name}')
     for name in (DRIVER, BRIDGE):
-        require(digest_tree(package / name) == manifest['bundle_files'][name],
+        bundle = package_kext(package, name)
+        require(digest_tree(bundle) == manifest['bundle_files'][name],
                 f'Unexpected file contents in {name}')
-        subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '--deep', str(package/name)], check=True)
+        subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '--deep', str(bundle)], check=True)
+    for name, expected_files in manifest.get('bundled_dependencies', {}).items():
+        bundle = package_kext(package, name)
+        require(bundle is not None, f'Missing bundled dependency {name} in release package')
+        require(digest_tree(bundle) == expected_files,
+                f'Checksum mismatch for bundled dependency {name}')
+    ocv = package / 'tools/ocvalidate'
+    if 'ocvalidate_sha256' in manifest:
+        require(ocv.is_file() and sha(ocv) == manifest['ocvalidate_sha256'],
+                'Bundled ocvalidate checksum mismatch')
     return manifest
 
 
@@ -142,11 +175,18 @@ def reusable_bundle(installed, name, identifier, matches):
     return next((path.name for path in candidates if matches(path)), None)
 
 
-def prepare(package, manifest, existing, cache, folder, custom_validator, with_bluetooth=False):
+def iter_kext_dirs(directory):
+    for bundle in directory.iterdir():
+        if (not bundle.name.startswith('._') and bundle.suffix.lower() == '.kext'
+                and bundle.is_dir() and not bundle.is_symlink()):
+            yield bundle
+
+
+def prepare(package, manifest, existing, cache, folder, custom_validator,
+            with_bluetooth=False, keep_existing_deps=False):
     installed = {}
-    for bundle in existing.iterdir():
-        if bundle.suffix.lower() == '.kext' and bundle.is_dir() and not bundle.is_symlink():
-            installed.setdefault(bundle_id(bundle), []).append(bundle)
+    for bundle in iter_kext_dirs(existing):
+        installed.setdefault(bundle_id(bundle), []).append(bundle)
     reused = {}
     for name in (DRIVER, BRIDGE):
         expected_files = manifest['bundle_files'][name]
@@ -155,9 +195,23 @@ def prepare(package, manifest, existing, cache, folder, custom_validator, with_b
         if current:
             reused[name] = current
         else:
-            shutil.copytree(package / name, folder / name)
+            copy_clean_bundle(package_kext(package, name), folder / name)
+    bundled_deps = manifest.get('bundled_dependencies', {})
     for entry in dependency_entries(with_bluetooth):
         name = entry['bundle']
+        bundled_src = package_kext(package, name)
+        bundled_hashes = bundled_deps.get(name)
+        if bundled_src is not None and bundled_hashes is not None:
+            current = reusable_bundle(installed, name, entry['bundle_identifier'],
+                                      lambda path: digest_tree(path) == bundled_hashes)
+            if not current and keep_existing_deps:
+                current = reusable_bundle(installed, name, entry['bundle_identifier'],
+                                          lambda path: dependency_matches(path, entry))
+            if current:
+                reused[name] = current
+            else:
+                copy_clean_bundle(bundled_src, folder / name)
+            continue
         current = reusable_bundle(installed, name, entry['bundle_identifier'],
                                   lambda path: dependency_matches(path, entry))
         if current:
@@ -172,6 +226,12 @@ def prepare(package, manifest, existing, cache, folder, custom_validator, with_b
     if custom_validator is not None:
         require(custom_validator.is_file() and os.access(custom_validator, os.X_OK), 'ocvalidate is not executable')
         return custom_validator, reused
+    bundled_ocv = package / 'tools/ocvalidate'
+    if bundled_ocv.is_file():
+        target = folder.parent / 'ocvalidate'
+        shutil.copy2(bundled_ocv, target)
+        target.chmod(0o700)
+        return target, reused
     spec = LOCK['validator']
     target = folder.parent / 'ocvalidate'
     with zipfile.ZipFile(fetch(spec, cache)) as file:
@@ -188,10 +248,12 @@ def kext_entry(name, folder, existing, reused):
     bundle = (existing if current is not None else folder) / path
     info = bundle_info(bundle)
     exe = executable_path(bundle, info)
-    if name in RELEASE_IDS or name in BLUETOOTH_ORDER:
+    if name in RELEASE_IDS:
         minimum, maximum = '25.0.0', '25.99.99'
     elif name in ('IOSkywalkFamily.kext', FAMILY):
         minimum, maximum = '23.0.0', ''
+    elif name == 'BlueToolFixup.kext':
+        minimum, maximum = '21.0.0', ''
     else:
         minimum, maximum = '', ''
     return {'Arch': 'x86_64', 'BundlePath': path.as_posix(), 'Comment': path.name,
@@ -199,22 +261,18 @@ def kext_entry(name, folder, existing, reused):
             'MaxKernel': maximum, 'MinKernel': minimum, 'PlistPath': 'Contents/Info.plist'}
 
 
-def configure(config, existing, staged, reused, with_bluetooth=False):
+def configure(config, existing, staged, reused, with_bluetooth=False, no_wpa3=False):
     order = ORDER + (BLUETOOTH_ORDER if with_bluetooth else ())
     dependency_ids = {entry['bundle_identifier'] for entry in dependency_entries(with_bluetooth)}
     managed_ids = set(RELEASE_IDS.values()) | MIGRATION_IDS | dependency_ids
     managed_names = {name for name in order if '/' not in name}
-    bundles = {path.name: bundle_id(path) for path in existing.iterdir()
-               if path.is_dir() and path.suffix.lower() == '.kext'}
-    if MIGRATION_IDS.intersection(bundles.values()):
-        managed_ids.add(LEGACY_COMPANION_ID)
+    bundles = {path.name: bundle_id(path) for path in iter_kext_dirs(existing)}
     installed = {name for name, identifier in bundles.items()
                  if name in managed_names or identifier in managed_ids}
     entries = config['Kernel']['Add']
     retained = []
     preserve_paths = {reused.get(name) for name in (LILU, *BLUETOOTH_ORDER)}
     preserved = {}
-    wifi_at = None
     for item in entries:
         path = PurePosixPath(item['BundlePath'])
         require(path.parts and not path.is_absolute() and '..' not in path.parts,
@@ -223,8 +281,6 @@ def configure(config, existing, staged, reused, with_bluetooth=False):
         if managed:
             if str(path) in preserve_paths:
                 preserved.setdefault(str(path), item)
-            elif str(path) != LILU and wifi_at is None:
-                wifi_at = len(retained)
             continue
         if item['Enabled']:
             require((existing / path).is_dir(), f'Enabled kext directory is missing: {path}')
@@ -243,10 +299,11 @@ def configure(config, existing, staged, reused, with_bluetooth=False):
                 and (not minimum or minimum <= kernel) and (not maximum or kernel <= maximum)):
             new[index] = dict(current, Enabled=True, PlistPath=entry['PlistPath'],
                               ExecutablePath=entry['ExecutablePath'])
-    wifi_index = wifi_at if wifi_at is not None else 0
-    entries[:] = new[:2] + retained[:wifi_index] + new[2:] + retained[wifi_index:]
+    # Place Lilu, RTLAirBridge, legacy Apple Wi-Fi stack, AMFIPass, RTLAirLink,
+    # RTLAirLinkFront (and Bluetooth when requested) first in exact dependency order.
+    entries[:] = new + retained
 
-    blocks = config['Kernel']['Block']
+    blocks = config['Kernel'].setdefault('Block', [])
     blocks[:] = [item for item in blocks if item['Identifier'] != SKYWALK_ID]
     blocks.append({'Arch': 'x86_64', 'Comment': 'RTLAirLink Wi-Fi stack',
                    'Enabled': True, 'Identifier': SKYWALK_ID, 'MaxKernel': '',
@@ -255,18 +312,23 @@ def configure(config, existing, staged, reused, with_bluetooth=False):
     config['Misc']['Security']['SecureBootModel'] = 'Disabled'
     nvram = config['NVRAM']
     args = nvram['Add'].setdefault(NVRAM, {})
+    required_args = list(BOOT_ARGS)
+    if with_bluetooth:
+        required_args.extend(BLUETOOTH_BOOT_ARGS)
+    if no_wpa3:
+        required_args.append('-rtw89nowpa3')
     previous = args.get('boot-args', '').split()
     updated = []
     for arg in previous:
         name = arg.partition('=')[0]
         if name in REMOVED_BOOT_ARGS:
             continue
-        if name in BOOT_ARGS:
+        if name in required_args:
             if name in updated:
                 continue
             arg = name
         updated.append(arg)
-    updated.extend(arg for arg in BOOT_ARGS if arg not in updated)
+    updated.extend(arg for arg in required_args if arg not in updated)
     if updated != previous:
         args['boot-args'] = ' '.join(updated)
     deletes = nvram['Delete'].setdefault(NVRAM, [])
@@ -275,13 +337,16 @@ def configure(config, existing, staged, reused, with_bluetooth=False):
     if with_bluetooth:
         args.update(BLUETOOTH_NVRAM)
         deletes.extend(name for name in BLUETOOTH_NVRAM if name not in deletes)
-    return installed.difference(reused.values()), [item['BundlePath'] for item in new]
+    return installed.difference(reused.values()), [item['BundlePath'] for item in new], required_args
 
 
 def detect_realtek_bluetooth():
-    registry = subprocess.check_output([
-        '/usr/sbin/ioreg', '-a', '-p', 'IOUSB', '-r', '-c', 'IOUSBHostDevice', '-d', '1', '-w0',
-    ])
+    try:
+        registry = subprocess.check_output([
+            '/usr/sbin/ioreg', '-a', '-p', 'IOUSB', '-r', '-c', 'IOUSBHostDevice', '-d', '1', '-w0',
+        ])
+    except subprocess.CalledProcessError:
+        return []
     supported = LOCK['bluetooth']['usb_devices']
     matches = set()
     for device in plistlib.loads(registry):
@@ -350,7 +415,7 @@ def select(count, label):
         return 0
     answer = input(f'Select {label} [1-{count}]: ').strip()
     require(answer.isdigit() and 1 <= int(answer) <= count, 'Invalid selection')
-    return int(answer)-1
+    return int(answer) - 1
 
 
 def validate_config(validator, config, stock_validator=False):
@@ -405,7 +470,7 @@ def install_transaction(oc, remove, staged, original, candidate, validate, backu
     live = oc / 'Kexts'
     config = oc / 'config.plist'
     require(config.read_bytes() == original, 'EFI changed after the installation preview')
-    sources = sorted(staged.glob('*.kext'))
+    sources = sorted(p for p in staged.glob('*.kext') if not p.name.startswith('._'))
     names = remove | {p.name for p in sources if (live / p.name).exists()}
     require(all((live / name).is_dir() and not (live / name).is_symlink() for name in names),
             'An existing kext changed before installation')
@@ -417,7 +482,7 @@ def install_transaction(oc, remove, staged, original, candidate, validate, backu
     (backup / 'config.plist').write_bytes(original)
     (backup / 'Kexts').mkdir()
     for name, hashes in before.items():
-        shutil.copytree(live / name, backup / 'Kexts' / name)
+        copy_clean_bundle(live / name, backup / 'Kexts' / name)
         require(digest_tree(backup / 'Kexts' / name) == hashes, f'Backup verification failed for {name}')
     print(f'Backup saved at {backup}', flush=True)
 
@@ -429,7 +494,7 @@ def install_transaction(oc, remove, staged, original, candidate, validate, backu
     try:
         checksums = reused_files.copy()
         for source in sources:
-            shutil.copytree(source, new / source.name)
+            copy_clean_bundle(source, new / source.name)
             checksums[source.name] = digest_tree(source)
             require(digest_tree(new / source.name) == checksums[source.name], f'Stage copy differs for {source.name}')
         require(config.read_bytes() == original and
@@ -456,16 +521,42 @@ def install_transaction(oc, remove, staged, original, candidate, validate, backu
         shutil.rmtree(transaction)
         raise
     shutil.rmtree(transaction)
-    print(f'RTLAirLink {VERSION} installed. Restart macOS to load the new kexts.')
+    print(f'RTLAirLink {VERSION} installed to EFI.')
+
+
+def maybe_install_rtgd(args):
+    installer = ROOT / 'tools/install-rtgd.sh'
+    binary = ROOT / 'tools/rtlairlink-rtgd'
+    if args.dry_run or args.no_rtgd or not installer.is_file() or not binary.is_file():
+        return
+    if not args.with_rtgd:
+        if args.yes:
+            return
+        answer = input('Install rtlairlink-rtgd service (smooth iPhone Mirroring) & rtlairlinkctl? [Y/n] ').strip().lower()
+        if answer not in ('', 'y', 'yes'):
+            print('Skipped rtlairlink-rtgd. You can install it later with: sudo bash tools/install-rtgd.sh')
+            return
+    cmd = ['/bin/bash', str(installer)] if os.geteuid() == 0 else ['/usr/bin/sudo', '/bin/bash', str(installer)]
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print('Warning: rtlairlink-rtgd installation did not complete. Run sudo bash tools/install-rtgd.sh manually.')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--efi', type=Path, help='Mounted EFI volume, OpenCore folder, or config.plist')
-    parser.add_argument('--cache', type=Path, default=Path.home()/ 'Downloads/RTLAirLink-Dependencies')
+    parser.add_argument('--cache', type=Path, default=Path.home() / 'Downloads/RTLAirLink-Dependencies')
     parser.add_argument('--ocvalidate', type=Path, help='Validator from your OpenCore release')
     parser.add_argument('--with-bluetooth', action='store_true',
-                        help='Set up Bluetooth when a supported Realtek USB controller is detected')
+                        help='Install or update bundled Realtek USB Bluetooth kexts (BlueToolFixup + RealtekBluetoothFirmware)')
+    parser.add_argument('--no-wpa3', action='store_true',
+                        help='Add -rtw89nowpa3 boot-arg to disable WPA3/SAE if your router has WPA3 issues')
+    parser.add_argument('--keep-existing-deps', action='store_true',
+                        help='Keep compatible Lilu/AMFIPass/Bluetooth kexts on EFI instead of replacing with bundled verified copies')
+    parser.add_argument('--with-rtgd', action='store_true',
+                        help='Install rtlairlink-rtgd background service (for smooth iPhone Mirroring) without prompting')
+    parser.add_argument('--no-rtgd', action='store_true',
+                        help='Skip installing rtlairlink-rtgd background service')
     parser.add_argument('--dry-run', action='store_true', help='Validate the plan without writing to the EFI')
     parser.add_argument('--yes', action='store_true', help='Apply to the explicitly selected --efi target')
     args = parser.parse_args()
@@ -490,45 +581,50 @@ def main():
         require(os.access(oc, os.W_OK) and os.access(existing, os.W_OK),
                 'The EFI is read-only. Remount it with write access and run the installer again.')
     bluetooth_controllers = detect_realtek_bluetooth() if args.with_bluetooth else []
-    with_bluetooth = bool(bluetooth_controllers)
+    with_bluetooth = bool(args.with_bluetooth)
     with tempfile.TemporaryDirectory(prefix='rtlairlink-install-') as path:
         stage = Path(path) / 'Kexts'
         stage.mkdir()
         custom_validator = args.ocvalidate.expanduser().resolve() if args.ocvalidate else None
         validator, reused = prepare(ROOT, manifest, existing, args.cache.expanduser(), stage,
-                                    custom_validator, with_bluetooth)
+                                    custom_validator, with_bluetooth, args.keep_existing_deps)
         validate = partial(validate_config, validator, stock_validator=custom_validator is None)
         reused_files = {name: digest_tree(existing / name) for name in reused.values()}
-        remove, load_order = configure(config, existing, stage, reused, with_bluetooth)
+        remove, load_order, required_args = configure(config, existing, stage, reused, with_bluetooth, args.no_wpa3)
         changes_config = config != plistlib.loads(original)
         planned = plistlib.dumps(config, sort_keys=False) if changes_config else original
         candidate = Path(path) / 'config.plist'
         candidate.write_bytes(planned)
         validate(candidate)
-        print(f'OpenCore target {oc}')
-        print('Load order ' + ', '.join(load_order))
-        print('Boot arguments ' + ' '.join(BOOT_ARGS))
-        print('SecureBootModel Disabled')
+        print(f'OpenCore target: {oc}')
+        print('Load order: ' + ' -> '.join(load_order))
+        print('Boot arguments: ' + ' '.join(required_args))
+        print('Kernel Block: ' + SKYWALK_ID + ' (Exclude, MinKernel 23.0.0)')
+        print('SecureBootModel: Disabled')
         if with_bluetooth:
-            print('Realtek Bluetooth USB ' + ', '.join(bluetooth_controllers))
-            print('Bluetooth NVRAM ' + ', '.join(BLUETOOTH_NVRAM))
-        elif args.with_bluetooth:
-            print('Wi-Fi plan only. The Realtek Bluetooth controller must appear on USB and match the firmware.')
-        copy = sorted(path.name for path in stage.iterdir())
-        print('Kexts to copy ' + (', '.join(copy) or 'none'))
-        print('Existing kexts to reuse ' + (', '.join(reused.values()) or 'none'))
-        print('Existing kexts to replace or remove ' + (', '.join(sorted(remove)) or 'none'))
+            if bluetooth_controllers:
+                print('Realtek Bluetooth USB detected: ' + ', '.join(bluetooth_controllers))
+            else:
+                print('Realtek Bluetooth USB: not currently detected (installing kexts as requested; verify your USB map)')
+            print('Bluetooth NVRAM: ' + ', '.join(BLUETOOTH_NVRAM))
+        copy = sorted(p.name for p in stage.iterdir() if not p.name.startswith('._'))
+        print('Kexts to install/replace: ' + (', '.join(copy) or 'none'))
+        print('Existing kexts already matching (reused): ' + (', '.join(sorted(reused.values())) or 'none'))
+        print('Existing kexts to back up & replace/remove: ' + (', '.join(sorted(remove)) or 'none'))
         if args.dry_run:
             print('Dry run passed.')
             return
         if not copy and not remove and not changes_config:
-            print(f'RTLAirLink {VERSION} and its dependencies are already configured.')
+            print(f'RTLAirLink {VERSION} and its dependencies are already up to date on EFI.')
+            maybe_install_rtgd(args)
             return
         if not args.yes:
             answer = input('Back up and install to this EFI? [y/N] ').strip().lower()
             require(answer in ('y', 'yes', 'install'), 'Installation cancelled')
         install(oc, remove, stage, original, planned, validate,
-                Path.home()/'Downloads'/'RTLAirLink-Backups', reused_files)
+                Path.home() / 'Downloads' / 'RTLAirLink-Backups', reused_files)
+    maybe_install_rtgd(args)
+    print(f'Done! Restart macOS to load RTLAirLink {VERSION}.')
 
 
 if __name__ == '__main__':

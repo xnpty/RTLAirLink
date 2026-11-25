@@ -4012,7 +4012,7 @@ void rtw89_mlme_get_status(struct rtw89_mlme_status *status)
     if (status->awdl_channel_owned) {
         status->freq = (u16)mlme.chan->center_freq;
         status->center_freq = (u16)mlme.chandef.center_freq1;
-        status->width = 20;
+        status->width = (u16)mlme_chandef_mhz(&mlme.chandef);
     }
     if (status->state != RTW89_MLME_IDLE) {
         status->width = (u16)mlme_chandef_mhz(&mlme.chandef);
