@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include "owly_native_link.h"
+#include "owly_native_scan_policy.h"
 #include "owly_awdl_sync.h"
 #include "owly_awdl_frame.h"
 #include <assert.h>
@@ -244,7 +245,7 @@ static void scan_activity_lifetime(void)
     CHECK(!owly_link_data_busy(&link_state,2000200));
     n=ethernet(false);CHECK(!owly_link_enqueue(&link_state,eth,n,2000300));
     CHECK(owly_link_data_busy(&link_state,2000300));
-    CHECK(!owly_link_data_busy(&link_state,2000300+4000000)); // stale queue bounded too
+    CHECK(!owly_link_data_busy(&link_state,2000300+OWLY_NATIVE_DATA_HOLD_US+1)); // stale queue bounded too
     link_state.sync_enabled=false;CHECK(!owly_link_data_busy(&link_state,2000300));
     link_state.sync_enabled=true;
     owly_link_reconcile(&link_state,true,local,44,2000400);
@@ -253,8 +254,8 @@ static void scan_activity_lifetime(void)
     n=ethernet(false);
     CHECK(owly_link_admit_ipv6(&link_state,remote,local,eth+14,n-14,2000100)==OWLY_LINK_IPV6_ACCEPTED);
     CHECK(owly_link_data_busy(&link_state,2000100));
-    CHECK(owly_link_data_busy(&link_state,4000100));
-    CHECK(!owly_link_data_busy(&link_state,4000101));
+    CHECK(owly_link_data_busy(&link_state,2000100+OWLY_NATIVE_DATA_HOLD_US));
+    CHECK(!owly_link_data_busy(&link_state,2000100+OWLY_NATIVE_DATA_HOLD_US+1));
     owly_link_reconcile(&link_state,true,local,149,999999); // real clock rollback
     CHECK(!owly_link_data_busy(&link_state,1000000) && !link_state.last_unicast_activity_us);
 }

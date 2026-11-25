@@ -1624,7 +1624,8 @@ int RTLAirLink::nativeRequest(bool isSet, int number, void *data)
             nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
             return kIOReturnSuccess;
         }
-        if ((link.state != RTW89_GLUE_LINK_DOWN || awdlProtected) && !wantSsidLen && !nWantFreqs) {
+        if ((link.state != RTW89_GLUE_LINK_DOWN || awdlProtected) && !wantSsidLen &&
+            (nWantFreqs == 0 || nWantFreqs > 1 || awdlProtected)) {
             /*
              * Connected (or with a real AWDL peer), and nothing in particular asked for: a real scan at
              * most every kConnectedScanGap, the firmware going back to the
@@ -2456,6 +2457,10 @@ int RTLAirLink::nativeAwdlSyncRequest(bool isSet,int number,void *data)
         setProperty("OwlyNativeConfigSyncRole",st.sync_role,32);
         setProperty("OwlyNativeConfigPSFPeriodMS",st.psf_period_ms,32);
         setProperty("OwlyNativeConfigRSSIDrops",st.rejected_rssi,64);
+        setProperty("OwlyMCEnabled",st.mc_enabled);
+        setProperty("OwlyMCVisits",st.mc_visits,64);
+        setProperty("OwlyMCNullFailures",st.mc_null_failures,64);
+        setProperty("OwlyMCMaxSwitchUS",st.mc_max_switch_us,64);
         return kIOReturnSuccess;
     }
     if (number==APPLE80211_IOC_AWDL_SYNC_FRAME_TEMPLATE) {

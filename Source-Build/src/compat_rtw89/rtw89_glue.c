@@ -2920,21 +2920,23 @@ static void owly_radio_maybe_attach(void)
             owly_idle_data_rx_us = now;
         }
         if (owly_idle_data_rx_us && now >= owly_idle_data_rx_us &&
-            now - owly_idle_data_rx_us < 2000000u)
+            now - owly_idle_data_rx_us < OWLY_NATIVE_DATA_HOLD_US)
             busy = true;
         const bool heard = rooted || peers;
         if (heard || !owly_idle_heard_us)
             owly_idle_heard_us = now;
         const uint8_t cur_ch = idle.freq == 5745 ? 149 : idle.freq == 5220 ? 44 : 6;
         uint8_t want_ch = cur_ch;
-        /* Upgrade ch 6 discovery -> 5 GHz (ch 149/44) even as handshake starts,
-         * but never move off a 5 GHz channel while data is actively flowing. */
-        if (follow && follow != cur_ch && (!busy || (cur_ch == 6 && follow != 6)))
+        /* Upgrade ch 6 discovery -> 5 GHz (ch 149/44) quickly before unicast
+         * traffic begins, but never switch channels while data is actively
+         * flowing (switching wipes s->peers, increments generation, and drops
+         * active QUIC/TCP connections with EHOSTUNREACH). */
+        if (follow && follow != cur_ch && !busy)
             want_ch = follow;
         else if (!heard && !busy && cur_ch != 6 &&
                  now >= owly_idle_heard_us && now - owly_idle_heard_us >= 10000000u)
             want_ch = 6;
-        const uint64_t min_gap = (cur_ch == 6 && want_ch != 6) ? 1000000u : 5000000u;
+        const uint64_t min_gap = (cur_ch == 6 && want_ch != 6) ? 250000u : 5000000u;
         if (want_ch != cur_ch &&
             (!owly_idle_move_us || now < owly_idle_move_us || now - owly_idle_move_us >= min_gap)) {
             const unsigned freq = want_ch == 149 ? 5745 : want_ch == 44 ? 5220 : 2437;
@@ -3177,8 +3179,12 @@ static bool owly_mc_should_run(void)
     rtw89_mlme_get_status(&st);
     if (st.state != RTW89_MLME_CONNECTED || st.awdl_channel_owned)
         return false;
-    /* Also on a social AP channel: the AWDL devices around may be elsewhere
-     * (an iPhone on Personal Hotspot sits on 6/149, not the home AP's 44). */
+    /* When the station is already associated on primary AWDL social channel
+     * 149 (5745 MHz) or 6 (2437 MHz), keep pure single-channel SCC instead of
+     * wandering off-channel: off-channel visits disrupt AP traffic and cause
+     * 149 <-> 6 ping-pong generation resets that tear down peers/QUIC. */
+    if (st.freq == 5745 || st.freq == 2437)
+        return false;
     social = ieee80211_get_channel(glue_hw()->wiphy, 2437);
     return social && !(social->flags & (IEEE80211_CHAN_DISABLED |
                                         IEEE80211_CHAN_NO_IR |
@@ -3408,22 +3414,25 @@ static void owly_mc_work_run(struct wiphy *wiphy, struct wiphy_work *work)
         owly_mc.data_rx_seen = data_rx;
         owly_mc.data_rx_us = now;
     }
-    if (owly_mc.data_rx_us && now - owly_mc.data_rx_us < 2000000u)
+    if (owly_mc.data_rx_us && now >= owly_mc.data_rx_us &&
+        now - owly_mc.data_rx_us < OWLY_NATIVE_DATA_HOLD_US)
         busy = true;
     const bool heard = rooted || peers;
     /* Go where the followed root's domain spends most of its slots (Apple
      * devices on another network mostly sit on 149). Moving drops the link
-     * state, so move at most every 5 s, and fall back to discovery on ch 6
+     * state, so never switch channels while data is in flight, move quickly
+     * when upgrading idle ch 6 -> 5 GHz, and fall back to discovery on ch 6
      * only after 10 s without hearing a root on the chosen channel. */
     if (heard)
         owly_mc.root_us = now;
     uint8_t want_ch = owly_mc.channel;
-    if (follow && follow != owly_mc.channel)
+    if (follow && follow != owly_mc.channel && !busy)
         want_ch = follow;
     else if (!heard && !busy && owly_mc.channel != 6 && now - owly_mc.root_us > 10000000u)
         want_ch = 6;
+    const uint64_t mc_min_gap = (owly_mc.channel == 6 && want_ch != 6) ? 500000u : 5000000u;
     if (want_ch != owly_mc.channel && owly_mc_channel_ok(want_ch) &&
-        (!owly_mc.moved_us || now - owly_mc.moved_us >= 5000000u)) {
+        (!owly_mc.moved_us || now < owly_mc.moved_us || now - owly_mc.moved_us >= mc_min_gap)) {
         IOLog("OWLY multichannel: ch %u -> ch %u (%s)\n", (unsigned)owly_mc.channel,
               (unsigned)want_ch, rooted ? "root's main channel" :
               heard ? "peers' main channel" : "nobody heard: discovery");

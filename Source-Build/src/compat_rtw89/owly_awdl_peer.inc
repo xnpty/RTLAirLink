@@ -474,6 +474,18 @@ static int owly_peer_open(struct owly_awdl_radio_peer *p,const uint8_t mac[6],
    if(bitrate==60 || bitrate==120 || bitrate==240)
     sta->deflink.supp_rates[ch->band]|=BIT(i);
   }
+  /* In cross-band multichannel (e.g. 5 GHz non-social AP visiting 2.4 GHz
+   * ch 6), rtw89_phy_ra_sta_update reads supp_rates for the chanctx's band. */
+  const struct ieee80211_channel *ctx_ch=owly_core04c_vif ?
+      owly_core04c_vif->bss_conf.chanreq.oper.chan : NULL;
+  if(ctx_ch && ctx_ch->band!=ch->band){
+   struct ieee80211_supported_band *cband=hw->wiphy->bands[ctx_ch->band];
+   for(unsigned i=0;cband && i<cband->n_bitrates && i<32;i++){
+    const unsigned bitrate=cband->bitrates[i].bitrate;
+    if(bitrate==60 || bitrate==120 || bitrate==240)
+     sta->deflink.supp_rates[ctx_ch->band]|=BIT(i);
+   }
+  }
  }
  spin_lock(&owly_peer_lock);memcpy(p->mac,mac,6);memcpy(p->own,owly_core04c_vif->addr,6);
  p->state=IEEE80211_STA_NOTEXIST;p->sta=sta;spin_unlock(&owly_peer_lock);
