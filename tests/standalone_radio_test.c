@@ -14,6 +14,7 @@
 #include "owly_scc_rx_policy.h"
 typedef uint8_t u8;
 typedef uint16_t u16;
+typedef uint32_t u32;
 #define GFP_KERNEL 0
 #define RTW89_MLME_IDLE 0
 #define RTW89_MLME_CONNECTED 4
@@ -21,13 +22,19 @@ typedef uint16_t u16;
 #define IEEE80211_CHAN_NO_IR 2
 #define IEEE80211_CHAN_RADAR 4
 #define NL80211_CHAN_NO_HT 0
+#define NL80211_CHAN_WIDTH_80 3
+#define NL80211_BAND_5GHZ 1
 #define mlme_info(...) ((void)0)
+struct ieee80211_supported_band {
+ struct { bool vht_supported; } vht_cap;
+ struct { bool ht_supported; struct { u8 rx_mask[2]; } mcs; } ht_cap;
+};
 struct ieee80211_channel { unsigned center_freq, flags, band; };
-struct cfg80211_chan_def { struct ieee80211_channel *chan; unsigned center_freq1; };
+struct cfg80211_chan_def { struct ieee80211_channel *chan; unsigned width, center_freq1, center_freq2; };
 struct ieee80211_chanctx_conf { struct cfg80211_chan_def def,min_def; unsigned rx_chains_static,rx_chains_dynamic; };
 struct ieee80211_bss_conf { struct ieee80211_chanctx_conf *chanctx_conf; struct { struct cfg80211_chan_def oper; } chanreq; };
 struct ieee80211_vif { struct ieee80211_bss_conf bss_conf; bool auxiliary; u8 addr[6]; };
-struct wiphy { void *bands[2]; bool locked; };
+struct wiphy { struct ieee80211_supported_band *bands[2]; bool locked; };
 struct ieee80211_hw { struct wiphy *wiphy; unsigned chanctx_data_size; };
 struct ieee80211_ops {
  int (*add_chanctx)(struct ieee80211_hw *,struct ieee80211_chanctx_conf *);
@@ -49,11 +56,15 @@ static void event(char c) {assert(order_len+1<sizeof(order));order[order_len++]=
 #define lockdep_assert_wiphy(w) assert((w)->locked)
 static void *kzalloc(size_t n,int flags) {(void)flags;if(fail_alloc)return NULL;allocs++;return calloc(1,n);}
 static void kfree(void *p) {if(p){frees++;free(p);}}
+static bool awdl_5g_allowed;
+static bool rtw89_cfg80211_awdl_5g_ok(struct wiphy *w, unsigned freq) {
+ lockdep_assert_wiphy(w); return awdl_5g_allowed && (freq == 5220u || freq == 5745u);
+}
 static struct ieee80211_channel *ieee80211_get_channel(struct wiphy *w,unsigned freq) {
  lockdep_assert_wiphy(w);for(unsigned i=0;i<3;i++)if(channels[i].center_freq==freq)return &channels[i];return NULL;
 }
 static void cfg80211_chandef_create(struct cfg80211_chan_def *d,struct ieee80211_channel *c,int mode) {
- (void)mode;d->chan=c;d->center_freq1=c->center_freq;
+ (void)mode;d->chan=c;d->width=0;d->center_freq1=c->center_freq;d->center_freq2=0;
 }
 static int add(struct ieee80211_hw *h,struct ieee80211_chanctx_conf *c) {
  lockdep_assert_wiphy(h->wiphy);assert(c->def.chan);event('a');added++;return fail_add ? -EIO : 0;
@@ -105,7 +116,8 @@ static bool owly_scc_aux_ready=true,filter_enabled,owly_link_lock;
 static unsigned filter_freq;
 static struct {bool explicitly_disabled;} owly_sync_state;
 static struct owly_native_link owly_link_state;
-static uint64_t clock_us,owly_idle_move_us;
+static uint64_t clock_us,owly_idle_move_us,owly_idle_heard_us;
+static bool owly_aux_cam_ready(struct ieee80211_hw *h, struct ieee80211_vif *v) { (void)h; (void)v; return false; }
 struct rtw89_mlme_status {int state;bool awdl_channel_owned;unsigned freq;};
 static void rtw89_mlme_get_status(struct rtw89_mlme_status *s) {
     s->state=mlme.state;s->awdl_channel_owned=mlme.awdl_chanctx;
@@ -125,8 +137,8 @@ static void reset(void) {
  allocs=frees=added=removed=assigned=unassigned=fail_alloc=fail_add=fail_assign=0;
  order_len=0;memset(order,0,sizeof(order));owly_core04d_before_release=NULL;
  for(unsigned i=0;i<3;i++)channels[i].flags=0;
- glue.up=true;glue.scanning=false;owly_sync_state.explicitly_disabled=false;
- memset(&owly_link_state,0,sizeof(owly_link_state));clock_us=1000000;owly_idle_move_us=0;filter_enabled=false;
+ glue.up=true;glue.scanning=false;owly_sync_state.explicitly_disabled=false;awdl_5g_allowed=false;
+ memset(&owly_link_state,0,sizeof(owly_link_state));clock_us=1000000;owly_idle_move_us=0;owly_idle_heard_us=0;filter_enabled=false;
 }
 static void test_owned_lifetime(void) {
  reset();assert(rtw89_mlme_awdl_hold_channel(2437)==0);
@@ -161,7 +173,8 @@ static void test_rx_and_channel_policy(void) {
  c.standalone_channel=true;assert(owly_abi6_demux(frame,sizeof(frame),&c,NULL).kind==OWLY_ABI6_RX_NOT_AWDL);
  c.scanning=true;assert(owly_abi6_demux(frame,sizeof(frame),&c,NULL).kind==OWLY_ABI6_RX_NOT_ELIGIBLE);c.scanning=false;
  c.rx_freq_mhz=5745;assert(owly_abi6_demux(frame,sizeof(frame),&c,NULL).kind==OWLY_ABI6_RX_NOT_ELIGIBLE);c.rx_freq_mhz=2437;
- c.sta_width_mhz=80;assert(owly_abi6_demux(frame,sizeof(frame),&c,NULL).kind==OWLY_ABI6_RX_NOT_ELIGIBLE);
+ c.sta_width_mhz=80;assert(owly_abi6_demux(frame,sizeof(frame),&c,NULL).kind==OWLY_ABI6_RX_NOT_AWDL);
+ c.sta_width_mhz=160;assert(owly_abi6_demux(frame,sizeof(frame),&c,NULL).kind==OWLY_ABI6_RX_NOT_ELIGIBLE);
  struct owly_native_link link={0};uint8_t mac[6]={2,1,2,3,4,5};owly_link_reconcile(&link,true,mac,6,1000000);
  assert(owly_link_follow_channel(&link,1000000)==6);
  struct owly_link_peer *p=&link.peers[0];p->used=p->clock_valid=true;p->last_rx_us=p->clock_rx_us=1000000;
@@ -174,17 +187,49 @@ static void test_rx_and_channel_policy(void) {
 }
 static void test_actual_radio_coordinator(void) {
  reset();owly_core04d_before_release=before_release;
+ /* When 5 GHz is NO_IR without AWDL 5G allowance, initial standalone starts on ch 6. */
+ channels[1].flags=IEEE80211_CHAN_NO_IR;channels[2].flags=IEEE80211_CHAN_NO_IR;
  glue.scanning=true;owly_radio_maybe_attach();assert(!added && !lease.channel);
  glue.scanning=false;owly_radio_maybe_attach();
  assert(mlme.state==RTW89_MLME_IDLE && mlme.awdl_chanctx && lease.channel==mlme.chanctx);
  assert(filter_enabled && filter_freq==2437);
  assert(mlme.awdl_self_addr && self_writes==1 && !memcmp(hardware_self,aux.addr,6));
  owly_radio_maybe_attach();assert(added==1 && assigned==2);
+ /* Multicast mDNS RX increments data_rx_admitted without marking unicast busy;
+  * once 5 GHz is permitted, ch 6 must upgrade immediately to ch 149. */
+ channels[2].flags=0;
  uint8_t mac[6]={2,1,2,3,4,5};owly_link_reconcile(&owly_link_state,true,mac,6,clock_us);
+ owly_link_state.sync_enabled=true;
  struct owly_link_peer *p=&owly_link_state.peers[0];p->used=p->clock_valid=true;
  p->last_rx_us=p->clock_rx_us=clock_us;p->mac[0]=2;p->mac[5]=10;
  for(unsigned i=0;i<16;i++)p->channels[i]=i<9?149:6;
+ owly_link_state.data_rx_admitted=42;
  owly_radio_maybe_attach();assert(mlme.chan==&channels[2] && lease.channel==mlme.chanctx && filter_freq==5745);
+ rtw89_mlme_awdl_release_channel();assert(!lease.channel && allocs==frees);
+ /* Active unicast traffic MUST prevent mid-transfer channel switch. */
+ reset();owly_core04d_before_release=before_release;
+ channels[1].flags=IEEE80211_CHAN_NO_IR;channels[2].flags=IEEE80211_CHAN_NO_IR;
+ owly_radio_maybe_attach();assert(filter_freq==2437);
+ channels[2].flags=0;
+ owly_link_reconcile(&owly_link_state,true,mac,6,clock_us);
+ owly_link_state.sync_enabled=true;
+ owly_link_state.last_unicast_activity_us=clock_us;
+ p=&owly_link_state.peers[0];p->used=p->clock_valid=true;
+ p->last_rx_us=p->clock_rx_us=clock_us;p->mac[0]=2;p->mac[5]=10;
+ for(unsigned i=0;i<16;i++)p->channels[i]=i<9?149:6;
+ owly_radio_maybe_attach();assert(mlme.chan==&channels[0] && filter_freq==2437);
+ rtw89_mlme_awdl_release_channel();assert(!lease.channel && allocs==frees);
+ /* When 5 GHz ch 149 is allowed, standalone starts immediately on ch 149. */
+ reset();owly_core04d_before_release=before_release;
+ owly_radio_maybe_attach();
+ assert(mlme.chan==&channels[2] && lease.channel==mlme.chanctx && filter_freq==5745);
+ rtw89_mlme_awdl_release_channel();assert(!lease.channel && allocs==frees);
+ /* Also starts on ch 149 when NO_IR is cleared by rtw89_cfg80211_awdl_5g_ok. */
+ reset();owly_core04d_before_release=before_release;
+ channels[1].flags=IEEE80211_CHAN_NO_IR;channels[2].flags=IEEE80211_CHAN_NO_IR;
+ awdl_5g_allowed=true;
+ owly_radio_maybe_attach();
+ assert(mlme.chan==&channels[2] && lease.channel==mlme.chanctx && filter_freq==5745);
  rtw89_mlme_awdl_release_channel();assert(!lease.channel && allocs==frees);
  reset();owly_sync_state.explicitly_disabled=true;owly_radio_maybe_attach();assert(!added && !lease.channel);
  reset();mlme.state=RTW89_MLME_CONNECTED;owly_radio_maybe_attach();assert(!added && !mlme.awdl_chanctx);

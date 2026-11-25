@@ -71,6 +71,7 @@ struct owly_link_window {
     bool has_master_election;
     uint8_t master_election[20];
     uint64_t actions, data_rx_admitted, tx_enqueued, tx_handoffs, tx_refused, tx_expired, tx_radio_acked;
+    uint64_t tx_refused_full, tx_refused_no_peer, tx_refused_other;
     unsigned peers, queued;
 };
 struct owly_native_link {
@@ -86,6 +87,7 @@ struct owly_native_link {
     uint64_t queue_used[OWLY_LINK_QUEUE_WORDS];
     uint64_t actions, rejected_actions, data_rx_admitted, data_rx_rejected;
     uint64_t tx_enqueued, tx_handoffs, tx_refused, tx_expired, tx_radio_acked;
+    uint64_t tx_refused_full, tx_refused_no_peer, tx_refused_other;
     /* Why a peer's clock was or was not taken: diagnostics only. */
     uint64_t clock_not_root, clock_no_countdown, clock_outlier, clock_reset, clock_ok;
 };

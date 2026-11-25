@@ -547,6 +547,8 @@ bool owly_link_window(struct owly_native_link *s,uint64_t now,struct owly_link_w
     out->actions=s->actions;out->data_rx_admitted=s->data_rx_admitted;
     out->tx_enqueued=s->tx_enqueued;out->tx_handoffs=s->tx_handoffs;
     out->tx_refused=s->tx_refused;out->tx_expired=s->tx_expired;out->tx_radio_acked=s->tx_radio_acked;
+    out->tx_refused_full=s->tx_refused_full;out->tx_refused_no_peer=s->tx_refused_no_peer;
+    out->tx_refused_other=s->tx_refused_other;
     out->queued=s->count;
     for(i=0;i<OWLY_LINK_PEERS;i++)if(s->peers[i].used)++out->peers;
     if(!s->active || s->tx_paused)return false;
@@ -657,11 +659,11 @@ int owly_link_enqueue(struct owly_native_link *s,const uint8_t *eth,size_t n,uin
     struct owly_link_frame *f;size_t size;unsigned at;int rc;
     if(!s || !s->active || (!s->sync_enabled && !s->starting))return -ENETDOWN;
     expire(s,now);
-    if(s->count==OWLY_LINK_QUEUE) {++s->tx_refused;return -ENOBUFS;}
+    if(s->count==OWLY_LINK_QUEUE) {++s->tx_refused;++s->tx_refused_full;return -ENOBUFS;}
     /* Reuse payload storage freed by replies that passed a held query. */
     at=queue_alloc_slot(s);f=&s->queue[at];
     rc=owly_link_build_tx(eth,n,s->local,0,0,f->bytes,sizeof(f->bytes),&size);
-    if(rc) {queue_free_slot(s,at);++s->tx_refused;return rc;}
+    if(rc) {queue_free_slot(s,at);++s->tx_refused;++s->tx_refused_other;return rc;}
     memcpy(f->destination,f->bytes+4,6);
     f->kind=tx_kind(f->destination,f->bytes+40,size-40);
     /* BSD can emit the first Bonjour query or announcement as soon as the
@@ -673,7 +675,7 @@ int owly_link_enqueue(struct owly_native_link *s,const uint8_t *eth,size_t n,uin
         return -ENETDOWN;
     }
     f->awaiting_first_mif=!s->sync_enabled;
-    if(!(f->destination[0]&1u) && !find(s,f->destination)) {queue_free_slot(s,at);++s->tx_refused;return -EHOSTUNREACH;}
+    if(!(f->destination[0]&1u) && !find(s,f->destination)) {queue_free_slot(s,at);++s->tx_refused;++s->tx_refused_no_peer;return -EHOSTUNREACH;}
     f->length=(uint16_t)size;f->queued_us=now;f->pause_credit_us=0;f->generation=s->generation;
     s->queue_order[(s->head+s->count)%OWLY_LINK_QUEUE]=(uint16_t)at;
     ++s->count;++s->tx_enqueued;
@@ -811,6 +813,7 @@ void owly_link_tx_result(struct owly_native_link *s,unsigned offset,uint64_t gen
     remove_queued(s,offset);
     if(rc) {
         ++s->tx_refused;
+        ++s->tx_refused_other;
     } else {
         ++s->wifi_sequence;
         ++s->awdl_sequence;

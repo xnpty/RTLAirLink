@@ -186,8 +186,8 @@ bool RTLAirLinkFront::owlyNativeAcquire(IO80211VirtualInterface **vif,OSObject *
     *vif=nullptr;*peer=nullptr;
     IOLockLock(_owlyVifLock);
     bool ok=!_owlyNativeClosed && !_owlyAWDLStopping && !_owlyVifMethodBusy &&
-        !_owlyVifBusy && !_owlyAWDLRequestBusy && _owlyNativePeer &&
-        _owlyAirlink.enabled && _owlyAirlink.cookie==_owlyNativePeerVif;
+        !_owlyVifBusy && !_owlyAWDLRequestBusy && !_owlyServiceWaiters &&
+        _owlyNativePeer && _owlyAirlink.enabled && _owlyAirlink.cookie==_owlyNativePeerVif;
     if(ok) {
         *vif=_owlyNativePeerVif;*peer=_owlyNativePeer;
         (*vif)->retain();(*peer)->retain();retain();
@@ -483,6 +483,10 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
             self->setProperty("OwlyNativeTXQueued",window.tx_enqueued,64);
             self->setProperty("OwlyNativeTXHandoffs",window.tx_handoffs,64);
             self->setProperty("OwlyNativeTXRefused",window.tx_refused,64);
+            self->setProperty("OwlyNativeTXRefusedFull",window.tx_refused_full,64);
+            self->setProperty("OwlyNativeTXRefusedNoPeer",window.tx_refused_no_peer,64);
+            self->setProperty("OwlyNativeTXRefusedOther",window.tx_refused_other,64);
+            self->setProperty("OwlyServiceBusyWaits",self->_owlyServiceBusyWaits,64);
             self->setProperty("OwlyNativeTXExpired",window.tx_expired,64);
             self->setProperty("OwlyNativeTXRadioACK",window.tx_radio_acked,64);
             self->setProperty("OwlyNativeActionCalls",self->_owlyNativeActionCalls,64);

@@ -238,11 +238,11 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  peer_present=true;
  s.bytes[4]|=1;
  CHECK(owly_sync_submit(ch,s.bytes,s.len,true)==0);
- CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_desc.no_ack);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_desc.no_ack && last_desc.port==link.port);
  s.bytes[4]&=~1u;
  s.bytes[0]=0xd0;
  CHECK(owly_sync_submit(ch,s.bytes,s.len,false)==0);
- CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_mapping==IEEE80211_AC_VO);
+ CHECK(last_desc.use_rate && last_desc.dis_data_fb && last_mapping==IEEE80211_AC_VO && last_desc.port==link.port);
 }
 #endif
 

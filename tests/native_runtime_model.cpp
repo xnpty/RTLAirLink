@@ -398,6 +398,12 @@ static void readiness_and_ownership() {
     f.front.verified=true;f.tick();CHECK(f.front._owlyNativeEnabled && enableCalls==before+1);CHECK(bufout[0x200]==0xaa && bufout[0x410]==0xaa);
     auto pkt=actionPacket();unsigned a=allocations,b=frees;
     CHECK(f.front.owlyNativeReceive(&pkt));CHECK(allocations==a+1 && frees==b+1);
+    /* A pending SET120 service ioctl waiter must make owlyNativeAcquire yield
+     * immediately so wifip2pd never hits ENXIO against 16 ms ticks or RX. */
+    f.front._owlyServiceWaiters=1;
+    CHECK(!f.front.owlyNativeReceive(&pkt));
+    f.front._owlyServiceWaiters=0;
+    CHECK(f.front.owlyNativeReceive(&pkt));
     CHECK(lastBody.size()==pkt.length-24 && !memcmp(lastBody.data(),pkt.bytes+24,lastBody.size()));
     int32_t rssi;memcpy(&rssi,lastMetadata.data()+44,4);CHECK(rssi==-45);
     uint32_t ch;memcpy(&ch,lastMetadata.data()+16,4);CHECK(ch==149);

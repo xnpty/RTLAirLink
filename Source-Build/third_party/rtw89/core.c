@@ -1325,6 +1325,10 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    !memcmp(frame + 16, awdl_bssid, sizeof(awdl_bssid))) {
 		desc_info->hw_ssn_sel = 0;
 		desc_info->hw_seq_mode = 0;
+		/* Always keep TXWD MULTIPORT_ID aligned with the AWDL auxiliary
+		 * VIF port (matching CMAC SET_CMC_TBL_MULTI_PORT_ID) for action
+		 * (PSF/MIF), multicast mDNS data, and unicast data frames. */
+		desc_info->port = link->port;
 	}
 
 	if (rtwdev->chip->chip_id != RTL8852B || !tx_req->vif || !tx_req->vif->p2p ||
@@ -1340,8 +1344,6 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    memcmp(frame + hdr_len, awdl_snap, sizeof(awdl_snap)))
 		return;
 
-	/* Always keep TXWD MULTIPORT_ID aligned with the AWDL auxiliary VIF
-	 * port (matching CMAC SET_CMC_TBL_MULTI_PORT_ID). */
 	desc_info->port = link->port;
 
 	if (!tx_req->sta)
@@ -4708,12 +4710,15 @@ static bool rtw89_core_awdl_data_rx_immediate(const struct rtw89_dev *rtwdev,
 	static const u8 awdl_bssid[] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
 
 	/* A PHY status report need not accompany an 8852B data frame.
-	 * AWDL unicast uses the known peer and RX channel. Release it
-	 * here; action frames still wait for the measured RSSI. */
+	 * AWDL unicast and IPv6 multicast (mDNS 33:33:...) use the known peer
+	 * and RX channel. Release them here; action frames still wait for the
+	 * measured RSSI. */
 	return rtwdev->chip->chip_id == RTL8852B && !rtwdev->scanning &&
 	       desc->frame_type == RTW89_RX_TYPE_DATA && skb->len >= 24 &&
 	       (skb->data[0] == 0x08 || skb->data[0] == 0x88) &&
-	       !(skb->data[1] & 0x43) && !(skb->data[4] & 1) &&
+	       !(skb->data[1] & 0x43) &&
+	       (!(skb->data[4] & 1) ||
+		(skb->data[4] == 0x33 && skb->data[5] == 0x33)) &&
 	       !memcmp(skb->data + 16, awdl_bssid, ETH_ALEN);
 }
 #endif

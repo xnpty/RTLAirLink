@@ -15,6 +15,7 @@ bool owly_radio_is_bound(decltype(owly_radio_state)*){return bound;}
 ieee80211_chanctx_conf *rtw89_mlme_awdl_shared_chanctx(){return shared;}
 struct HW{void*wiphy=this;}hw;
 HW*glue_hw(){return &hw;}
+bool rtw89_cfg80211_awdl_5g_ok(void*,unsigned){return false;}
 int locks=0, lock_calls=0;
 void mutex_lock(int*){assert(locks++==0);++lock_calls;}
 void mutex_unlock(int*){assert(--locks==0);}

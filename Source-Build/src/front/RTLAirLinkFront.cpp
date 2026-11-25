@@ -423,6 +423,9 @@ void RTLAirLinkFront::stop(IOService *provider)
             ;
         IOLockLock(_owlyVifLock);
         _owlyAWDLStopping = true;
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+        IOLockWakeup(_owlyVifLock, &_owlyNativeUsers, false);
+#endif
         const bool active = _owlyAWDLRequestBusy || _owlyVifBusy || _owlyVifMethodBusy;
         if (nested && active) {
             /* Cannot wait for ourselves or tear down an object which Apple
@@ -911,6 +914,20 @@ bool RTLAirLinkFront::owlyServiceIoctl(IO80211Interface *interface,
     retain();
     IOWorkLoop *loop = _workLoop;
     loop->retain();
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    bool waited = false;
+    if (!loop->inGate()) {
+        IOLockLock(_owlyVifLock);
+        ++_owlyServiceWaiters;
+        waited = true;
+        while (_owlyNativeUsers && _owlyNativeOwnerThread != current_thread() &&
+               !_owlyAWDLStopping) {
+            ++_owlyServiceBusyWaits;
+            IOLockSleep(_owlyVifLock, &_owlyNativeUsers, THREAD_UNINT);
+        }
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     OwlyServiceCall call = {interface, vif, net, command, envelope, ENXIO};
     const IOReturn rc = loop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
@@ -919,6 +936,13 @@ bool RTLAirLinkFront::owlyServiceIoctl(IO80211Interface *interface,
             args->result = self->owlyServiceIoctlOnGate(args);
             return kIOReturnSuccess;
         }, this, &call);
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (waited) {
+        IOLockLock(_owlyVifLock);
+        --_owlyServiceWaiters;
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     *result = rc == kIOReturnSuccess ? call.result : ENXIO;
     loop->release();
     /* Deferred stop is finished in apple80211_ioctl AFTER backLeave(). */
@@ -2019,6 +2043,20 @@ SInt32 RTLAirLinkFront::enableVirtualInterface(IO80211VirtualInterface *interfac
     retain();
     IOWorkLoop *loop = _workLoop;
     loop->retain();
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    bool waited = false;
+    if (!loop->inGate()) {
+        IOLockLock(_owlyVifLock);
+        ++_owlyServiceWaiters;
+        waited = true;
+        while (_owlyNativeUsers && _owlyNativeOwnerThread != current_thread() &&
+               !_owlyAWDLStopping) {
+            ++_owlyServiceBusyWaits;
+            IOLockSleep(_owlyVifLock, &_owlyNativeUsers, THREAD_UNINT);
+        }
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     struct Args { IO80211VirtualInterface *vif; SInt32 result; } args = { interface, kIOReturnNotReady };
     const IOReturn rc = loop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
@@ -2027,6 +2065,13 @@ SInt32 RTLAirLinkFront::enableVirtualInterface(IO80211VirtualInterface *interfac
             a->result = self->owlyEnableVirtualInterfaceOnGate(a->vif);
             return kIOReturnSuccess;
         }, this, &args);
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (waited) {
+        IOLockLock(_owlyVifLock);
+        --_owlyServiceWaiters;
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     loop->release();
     owlyFinishDeferredStop();
     release();
@@ -2039,6 +2084,20 @@ SInt32 RTLAirLinkFront::disableVirtualInterface(IO80211VirtualInterface *interfa
     retain();
     IOWorkLoop *loop = _workLoop;
     loop->retain();
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    bool waited = false;
+    if (!loop->inGate()) {
+        IOLockLock(_owlyVifLock);
+        ++_owlyServiceWaiters;
+        waited = true;
+        while (_owlyNativeUsers && _owlyNativeOwnerThread != current_thread() &&
+               !_owlyAWDLStopping) {
+            ++_owlyServiceBusyWaits;
+            IOLockSleep(_owlyVifLock, &_owlyNativeUsers, THREAD_UNINT);
+        }
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     struct Args { IO80211VirtualInterface *vif; SInt32 result; } args = { interface, kIOReturnNotReady };
     const IOReturn rc = loop->runAction(
         [](OSObject *owner, void *opaque, void *, void *, void *) -> IOReturn {
@@ -2047,6 +2106,13 @@ SInt32 RTLAirLinkFront::disableVirtualInterface(IO80211VirtualInterface *interfa
             a->result = self->owlyDisableVirtualInterfaceOnGate(a->vif);
             return kIOReturnSuccess;
         }, this, &args);
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (waited) {
+        IOLockLock(_owlyVifLock);
+        --_owlyServiceWaiters;
+        IOLockUnlock(_owlyVifLock);
+    }
+#endif
     loop->release();
     owlyFinishDeferredStop();
     release();

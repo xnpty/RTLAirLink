@@ -422,8 +422,6 @@ static struct wiphy_work owly_radio_work;
 static uint64_t owly_idle_policy_us;
 static uint64_t owly_idle_move_us;
 static uint64_t owly_idle_heard_us;
-static uint64_t owly_idle_data_rx_seen;
-static uint64_t owly_idle_data_rx_us;
 static void owly_radio_maybe_attach(void);
 static void owly_radio_work_run(struct wiphy *wiphy, struct wiphy_work *work);
 static void owly_radio_detach(struct ieee80211_chanctx_conf *primary);
@@ -468,7 +466,6 @@ static struct {
     uint64_t visits, null_failures, slow_switches, max_switch_us;
     uint64_t moved_us, root_us, slot_log_us;
     uint32_t switch_avg_us, lead_us;
-    uint64_t data_rx_seen, data_rx_us;  /* AWDL data from peers: busy too */
     uint64_t peer_log_us;
     uint8_t last_follow, last_data_ch;
     bool last_rooted;
@@ -2912,16 +2909,10 @@ static void owly_radio_maybe_attach(void)
         const uint8_t follow = data_ch ? data_ch :
                                rooted ? owly_link_follow_channel(&owly_link_state, now) :
                                         owly_link_peer_channel(&owly_link_state, now);
-        bool busy = owly_link_data_busy(&owly_link_state, now);
-        const uint64_t data_rx = owly_link_state.data_rx_admitted;
+        /* owly_link_data_busy tracks both unicast TX and unicast RX without
+         * letting periodic multicast mDNS (ff02::fb) block ch 6 -> 5 GHz. */
+        const bool busy = owly_link_data_busy(&owly_link_state, now);
         spin_unlock(&owly_link_lock);
-        if (data_rx != owly_idle_data_rx_seen) {
-            owly_idle_data_rx_seen = data_rx;
-            owly_idle_data_rx_us = now;
-        }
-        if (owly_idle_data_rx_us && now >= owly_idle_data_rx_us &&
-            now - owly_idle_data_rx_us < OWLY_NATIVE_DATA_HOLD_US)
-            busy = true;
         const bool heard = rooted || peers;
         if (heard || !owly_idle_heard_us)
             owly_idle_heard_us = now;
@@ -2972,12 +2963,34 @@ static void owly_radio_maybe_attach(void)
         struct rtw89_mlme_status st;
         rtw89_mlme_get_status(&st);
         if (st.state == RTW89_MLME_IDLE) {
-            /* Channel 6 is the initial discovery channel. This creates an
-             * actual driver context; it never marks the station connected. */
-            const int rc = rtw89_mlme_awdl_hold_channel(2437);
+            /* Prefer 5 GHz social channel (149, else 44) when regulatory rules
+             * permit active AWDL TX, avoiding 2.4 GHz ch 6 BT-coex/20 MHz
+             * bottlenecks in standalone mode. Fall back to ch 6 if 5 GHz is
+             * NO_IR/disabled or after 10 s idle without hearing any peer. */
+            static const u16 initial_freqs[3] = {5745u, 5220u, 2437u};
+            u16 start_freq = 2437u;
+            for (unsigned i = 0; i < 3u; ++i) {
+                const u16 f = initial_freqs[i];
+                struct ieee80211_channel *c = ieee80211_get_channel(hw->wiphy, f);
+                if (c && !(c->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_RADAR)) &&
+                    (!(c->flags & IEEE80211_CHAN_NO_IR) ||
+                     rtw89_cfg80211_awdl_5g_ok(hw->wiphy, f))) {
+                    start_freq = f;
+                    break;
+                }
+            }
+            int rc = rtw89_mlme_awdl_hold_channel(start_freq);
+            if (rc && rc != -EBUSY && start_freq != 2437u) {
+                start_freq = 2437u;
+                rc = rtw89_mlme_awdl_hold_channel(start_freq);
+            }
             if (rc && rc != -EBUSY) {
                 owly_radio_state.last_error=rc; owly_radio_state.blocked=true;
-                IOLog("OWLY standalone: channel hold refused rc=%d\n", rc);
+                IOLog("OWLY standalone: channel hold refused freq=%u rc=%d\n",
+                      (unsigned)start_freq, rc);
+            } else if (!rc) {
+                owly_idle_heard_us = now;
+                IOLog("OWLY standalone: initial hold freq=%u\n", (unsigned)start_freq);
             }
             primary = rtw89_mlme_awdl_shared_chanctx();
         }
@@ -3405,18 +3418,10 @@ static void owly_mc_work_run(struct wiphy *wiphy, struct wiphy_work *work)
     owly_mc.last_follow = follow;
     owly_mc.last_data_ch = data_ch;
     owly_mc.last_rooted = rooted;
+    /* owly_link_data_busy tracks both unicast TX and unicast RX without
+     * letting periodic multicast mDNS (ff02::fb) block channel upgrades. */
     busy = owly_link_data_busy(&owly_link_state, now);
-    const uint64_t data_rx = owly_link_state.data_rx_admitted;
     spin_unlock(&owly_link_lock);
-    /* A peer sending us data (a TLS handshake, a transfer) needs the
-     * slots as much as our own queue does. */
-    if (data_rx != owly_mc.data_rx_seen) {
-        owly_mc.data_rx_seen = data_rx;
-        owly_mc.data_rx_us = now;
-    }
-    if (owly_mc.data_rx_us && now >= owly_mc.data_rx_us &&
-        now - owly_mc.data_rx_us < OWLY_NATIVE_DATA_HOLD_US)
-        busy = true;
     const bool heard = rooted || peers;
     /* Go where the followed root's domain spends most of its slots (Apple
      * devices on another network mostly sit on 149). Moving drops the link
@@ -3661,10 +3666,10 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
                   (unsigned)owly_sync_state.channel,(unsigned)length,rc);
     }
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
-    /* Drain up to a full 64-MPDU A-MPDU window per pass, kicking the PCI
-     * doorbell halfway so RTL8852BE begins transmitting the first 32 MPDUs
-     * while MPDUs 33..64 are staged. */
-    const unsigned int budget = owly_peer_turbo ? 64u : 4u;
+    /* Drain up to two 64-MPDU A-MPDU windows per pass, kicking the PCI
+     * doorbell every 32 MPDUs so RTL8852BE begins transmitting while the
+     * next batch is staged without letting high-rate bursts fill the queue. */
+    const unsigned int budget = owly_peer_turbo ? 128u : 4u;
     unsigned int sent = 0;
     bool ring_stalled = false;
     int doorbell = -1;
@@ -3702,7 +3707,7 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
             break;
         }
         ++sent;
-        if (doorbell >= 0 && sent == 32u) {
+        if (doorbell >= 0 && (sent & 31u) == 0u) {
             rtw89_core_tx_kick_off(glue_hw()->priv, doorbell);
             doorbell = -1;
         }
@@ -4268,7 +4273,6 @@ static int glue_up_locked(void)
         goto err_unlock;
     }
     owly_idle_move_us=owly_idle_policy_us=owly_idle_heard_us=0;
-    owly_idle_data_rx_seen=owly_idle_data_rx_us=0;
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     __atomic_store_n(&owly_tx_ring_stalled, false, __ATOMIC_RELAXED);
     __atomic_store_n(&owly_tx_reclaimed, false, __ATOMIC_RELAXED);

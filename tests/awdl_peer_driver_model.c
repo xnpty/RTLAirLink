@@ -53,11 +53,16 @@ static void spin_lock(spinlock_t *l){assert(!*l);*l=1;}
 static void spin_unlock(spinlock_t *l){assert(*l);*l=0;}
 static void spin_lock_destroy(spinlock_t *l){assert(!*l);}
 struct work_struct {void (*func)(struct work_struct *);bool pending;};
+struct delayed_work {struct work_struct work;};
 struct workqueue_struct {unsigned unused;};
 static struct workqueue_struct receive_queue;
 #define INIT_WORK(w,f) do {(w)->func=(f);(w)->pending=false;} while(0)
+#define INIT_DELAYED_WORK(w,f) INIT_WORK(&(w)->work,(f))
+static unsigned usecs_to_jiffies(unsigned us){return us;}
 static bool queue_work(struct workqueue_struct *q,struct work_struct *w){assert(q==&receive_queue);w->pending=true;return true;}
+static bool queue_delayed_work(struct workqueue_struct *q,struct delayed_work *w,unsigned d){(void)d;return queue_work(q,&w->work);}
 static bool cancel_work_sync(struct work_struct *w){w->pending=false;return true;}
+static bool cancel_delayed_work_sync(struct delayed_work *w){return cancel_work_sync(&w->work);}
 struct list_head {struct list_head *next,*prev;};
 #define INIT_LIST_HEAD(h) ((h)->next=(h)->prev=(h))
 static bool list_empty(struct list_head *h){return h->next==h;}

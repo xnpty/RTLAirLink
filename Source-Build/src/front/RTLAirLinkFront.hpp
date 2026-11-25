@@ -124,7 +124,8 @@ private:
     OSObject *_owlyNativePeer=nullptr;
     IO80211VirtualInterface *_owlyNativePeerVif=nullptr;
     bool _owlyNativeClosed=true,_owlyNativePending=false,_owlyNativeEnabled=false;
-    unsigned _owlyNativeUsers=0,_owlyNativeDataUsers=0,_owlyNativeTicks=0;
+    unsigned _owlyNativeUsers=0,_owlyNativeDataUsers=0,_owlyNativeTicks=0,_owlyServiceWaiters=0;
+    uint64_t _owlyServiceBusyWaits=0;
     uint16_t _owlyNativeLastWindow=0;
     bool _owlyNativeHaveWindow=false;
     uint64_t _owlyNativeActionCalls=0,_owlyNativeDataCalls=0,_owlyNativeWindowCalls=0;

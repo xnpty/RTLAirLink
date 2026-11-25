@@ -32,8 +32,8 @@ int main(void){
  owly_ba_push(&s,4093,(void *)1,4,emit,drop,NULL);owly_ba_push(&s,4094,(void *)2,5,emit,drop,NULL);
  assert(count==4);for(unsigned i=0;i<4;i++)assert(got[i]==i+1);
  owly_ba_push(&s,4094,(void *)2,6,emit,drop,NULL);assert(drops==2);
- owly_ba_push(&s,3,(void *)7,7,emit,drop,NULL);owly_ba_timeout(&s,100006,emit,NULL);assert(count==4);
- owly_ba_timeout(&s,100007,emit,NULL);assert(count==5 && got[4]==7);
+ owly_ba_push(&s,3,(void *)7,7,emit,drop,NULL);owly_ba_timeout(&s,7u+OWLY_BA_HOLE_US-1u,emit,NULL);assert(count==4);
+ owly_ba_timeout(&s,7u+OWLY_BA_HOLE_US,emit,NULL);assert(count==5 && got[4]==7);
  owly_ba_push(&s,6,(void *)10,8,emit,drop,NULL);owly_ba_bar(&s,6,emit,NULL);assert(count==6 && got[5]==10);
  owly_ba_push(&s,8,(void *)12,9,emit,drop,NULL);owly_ba_clear(&s,drop,NULL);assert(drops==3 && !s.active);
  assert(!owly_ba_start(&s,4096,64) && !owly_ba_start(&s,0,65) && !owly_ba_start(&s,0,0));
