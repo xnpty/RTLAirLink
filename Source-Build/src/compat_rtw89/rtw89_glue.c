@@ -3689,10 +3689,11 @@ static void owly_sync_work_run(struct wiphy *wiphy,struct wiphy_work *work)
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
         if (owly_sync_state.last_native_mi) {
             const uint64_t count=owly_sync_state.native_mi_handed_off;
-            if (count<=4 || rc || !(count%64))
+            const bool unicast=(owly_sync_txbuf[4]&1u)==0;
+            if (unicast || count<=4 || rc || !(count%64))
                 IOLog("OWLY native MI: handoff=%llu unicast=%u ch=%u bytes=%u rc=%d "
                       "remote_master_ch=%u shared_slots=0x%04x\n",
-                      (unsigned long long)count,(unsigned)((owly_sync_txbuf[4]&1u)==0),
+                      (unsigned long long)count,(unsigned)unicast,
                       (unsigned)owly_sync_state.channel,(unsigned)length,rc,
                       owly_sync_state.peer_clock.remote ?
                           (unsigned)owly_sync_state.peer_clock.master_channel : 0u,
@@ -4082,8 +4083,8 @@ int rtw89_glue_awdl_mi(bool automatic,const uint8_t destination[6],
     int rc=-ENETDOWN;
     if (ch || (automatic && glue.up && owly_core04c_vif)) {
         static size_t described_len;
-        if (bytes && length != described_len) {
-            described_len = length;
+        if (bytes && (!automatic || length != described_len)) {
+            if (automatic) described_len = length;
             owly_mi_describe(automatic ? "ours" : "ours-1x", owly_core04c_vif->addr, bytes, length);
         }
         rc=owly_sync_mi(&owly_sync_state,automatic,destination,bytes,length,

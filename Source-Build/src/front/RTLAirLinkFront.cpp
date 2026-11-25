@@ -1545,6 +1545,45 @@ SInt32 RTLAirLinkFront::apple80211VirtualRequest(UInt type, int number,
                     static_cast<unsigned long long>(static_cast<uint32_t>(rc)),32);
         return rc;
     }
+#if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    /* Legacy4C's IO80211P2PDataPathManager queries GET130 during AWDL setup
+     * and issues SET143 (ADD=0 / DELETE=2 / UPDATE=6) before RTG/UMI traffic
+     * registration. Match AirPort_BrcmNIC: answer GET130 with a bounded cache
+     * limit and complete SET143 asynchronously with reportDataPathEvents(0x33). */
+    if (type == SIOCGA80211 && number == APPLE80211_IOC_PEER_CACHE_MAXIMUM_SIZE &&
+        vif && data && vif->getInterfaceRole() == RTW89_FRONT_ROLE_AIRLINK_OBSERVED) {
+        uint32_t reqVer = 0;
+        memcpy(&reqVer, data, sizeof(reqVer));
+        if (reqVer > APPLE80211_VERSION) return kIOReturnBadArgument;
+        const uint32_t response[2] = { APPLE80211_VERSION, 32u };
+        memcpy(data, response, sizeof(response));
+        setProperty("OwlyNativePeerCacheMaxSizeResult", 32ULL, 32);
+        return kIOReturnSuccess;
+    }
+    if (type == SIOCSA80211 && number == APPLE80211_IOC_PEER_CACHE_CONTROL &&
+        vif && data && _owlyVifLock &&
+        vif->getInterfaceRole() == RTW89_FRONT_ROLE_AIRLINK_OBSERVED) {
+        IOLockLock(_owlyVifLock);
+        const bool ours = !_owlyAWDLStopping && _owlyAttachedAWDL == vif && !_owlyAWDLPendingBSD;
+        IOLockUnlock(_owlyVifLock);
+        if (!ours) return kIOReturnNotReady;
+        uint32_t reqVer = 0, opcode = 0;
+        uint8_t mac[6] = {};
+        memcpy(&reqVer, data, sizeof(reqVer));
+        memcpy(&opcode, static_cast<const uint8_t *>(data) + 4, sizeof(opcode));
+        memcpy(mac, static_cast<const uint8_t *>(data) + 8, sizeof(mac));
+        if (reqVer > APPLE80211_VERSION) return kIOReturnBadArgument;
+        if (opcode == 0 || opcode == 6) {
+            owlyNativeNotePeerCache(mac, 1u);
+            return kIOReturnSuccess;
+        }
+        if (opcode == 2) {
+            owlyNativeNotePeerCache(mac, 3u);
+            return kIOReturnSuccess;
+        }
+        return kIOReturnUnsupported;
+    }
+#endif
     const bool syncRequest =
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
         (type==SIOCSA80211 && (number==APPLE80211_IOC_AWDL_OOB_AUTO_REQUEST ||

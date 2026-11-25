@@ -134,17 +134,18 @@ bool RTLAirLinkFront::owlyNativeStart()
     _owlyNativeCall=thread_call_allocate(owlyNativeTick,this);
     if(!_owlyNativeCall)return false;
     _owlyNativeClosed=false;
-    setProperty("OwlyNativePeerDataRevision",7ULL,32);
+    setProperty("OwlyNativePeerDataRevision",8ULL,32);
     return true;
 }
-void RTLAirLinkFront::owlyNativeSchedule(uint64_t us)
+void RTLAirLinkFront::owlyNativeSchedule(uint64_t us,bool expedite)
 {
     uint64_t interval;
     nanoseconds_to_absolutetime(us*1000u,&interval);
     IOLockLock(_owlyVifLock);
-    if(!_owlyNativeClosed && !_owlyNativePending && _owlyNativeCall) {
-        _owlyNativePending=true;retain();
-        (void)thread_call_enter_delayed(_owlyNativeCall,mach_absolute_time()+interval);
+    if(!_owlyNativeClosed && _owlyNativeCall && (!_owlyNativePending || expedite)) {
+        const bool already=thread_call_enter_delayed(_owlyNativeCall,mach_absolute_time()+interval);
+        if(!already)retain();
+        _owlyNativePending=true;
     }
     IOLockUnlock(_owlyVifLock);
 }
@@ -168,6 +169,23 @@ void RTLAirLinkFront::owlyNativeCapture(IO80211VirtualInterface *vif,IO80211Peer
     OSSafeReleaseNULL(oldPeer);OSSafeReleaseNULL(oldVif);
     owlyNativeSchedule(1000);
 }
+void RTLAirLinkFront::owlyNativeNotePeerCache(const uint8_t mac[6],uint32_t opcode)
+{
+    /* Called from inside Apple's SET143 gate: only queue. Delivering event 0x33
+     * asynchronously matches AirPort_BrcmNIC and avoids racing addPeerToFWCache's
+     * post-ioctl writes to peer+0x250. Expedite the thread_call so peer+0x251 is
+     * marked cached before Legacy4C's handleUmiTimer runs. */
+    IOLockLock(_owlyVifLock);
+    ++_owlyPeerCacheNoted;
+    if(!_owlyNativeClosed && _owlyPeerCacheCount<16) {
+        const unsigned slot=(_owlyPeerCacheHead+_owlyPeerCacheCount)%16;
+        memcpy(_owlyPeerCacheMac[slot],mac,6);
+        _owlyPeerCacheOp[slot]=opcode;
+        ++_owlyPeerCacheCount;
+    } else ++_owlyPeerCacheDropped;
+    IOLockUnlock(_owlyVifLock);
+    owlyNativeSchedule(0,true);
+}
 void RTLAirLinkFront::owlyNativeNoteUMI(const uint8_t mac[6])
 {
     /* Called from inside Apple's SET149 gate: only queue. The status event is
@@ -179,7 +197,7 @@ void RTLAirLinkFront::owlyNativeNoteUMI(const uint8_t mac[6])
         ++_owlyUmiCount;
     } else ++_owlyUmiDropped;
     IOLockUnlock(_owlyVifLock);
-    owlyNativeSchedule(1000);
+    owlyNativeSchedule(0,true);
 }
 bool RTLAirLinkFront::owlyNativeAcquire(IO80211VirtualInterface **vif,OSObject **peer)
 {
@@ -235,7 +253,7 @@ void RTLAirLinkFront::owlyNativeStop()
     bool canceled=_owlyNativeCall && thread_call_cancel(_owlyNativeCall);
     bool releasePending=false;OSObject *peer;IO80211VirtualInterface *vif;
     IOLockLock(_owlyVifLock);
-    if(canceled && _owlyNativePending) {_owlyNativePending=false;releasePending=true;}
+    if(canceled) {_owlyNativePending=false;releasePending=true;}
     /* stop() defers a call from the owner before reaching this method.
      * No timeout permits an Apple call to outlive VIF teardown. */
     while((_owlyNativeUsers && _owlyNativeOwnerThread!=current_thread()) || _owlyNativeDataUsers)
@@ -245,6 +263,7 @@ void RTLAirLinkFront::owlyNativeStop()
     __atomic_store_n(&_owlyNativeEnabled,false,__ATOMIC_RELEASE);
     _owlyNativeEnableIssued=false;_owlyNativeProgrammedChannel=0;
     _owlyNativeProgrammedGeneration=0;
+    _owlyPeerCacheHead=0;_owlyPeerCacheCount=0;
     _owlyUmiHead=0;_owlyUmiCount=0;
     IOLockUnlock(_owlyVifLock);
     OSSafeReleaseNULL(peer);OSSafeReleaseNULL(vif);
@@ -302,6 +321,37 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
                 self->release();return;
             }
             const bool layoutReady=gateStatus==kIOReturnSuccess && gate.valid;
+            for(;;) {
+                /* Deliver owed peer-cache indications (event 0x33, ADD_IND=1 /
+                 * DELETE_IND=3) before UMI status and AW-start so Legacy4C marks
+                 * the peer cached (peer+0x251=1, peer+0x250=0) before UMI TX. */
+                uint8_t mac[6]={};uint32_t opcode=0;bool have=false;
+                IOLockLock(self->_owlyVifLock);
+                if(self->_owlyPeerCacheCount) {
+                    const unsigned slot=self->_owlyPeerCacheHead;
+                    memcpy(mac,self->_owlyPeerCacheMac[slot],6);
+                    opcode=self->_owlyPeerCacheOp[slot];
+                    self->_owlyPeerCacheHead=(slot+1)%16;--self->_owlyPeerCacheCount;have=true;
+                }
+                IOLockUnlock(self->_owlyVifLock);
+                if(!have)break;
+                struct PeerCacheCall {OSObject *peer;alignas(8) uint8_t msg[0x1d0];} cache={peer,{}};
+                const uint32_t cacheVer=APPLE80211_VERSION;
+                memcpy(cache.msg,&cacheVer,4);
+                memcpy(cache.msg+4,&opcode,4);
+                memcpy(cache.msg+8,mac,6);
+                IOReturn cacheStatus=self->_workLoop->runAction(
+                    [](OSObject *,void *opaque,void *,void *,void *) -> IOReturn {
+                        auto *c=static_cast<PeerCacheCall *>(opaque);
+                        owly_peer_window(c->peer,0x33,c->msg,sizeof(c->msg));
+                        return kIOReturnSuccess;
+                    },self,&cache);
+                if(cacheStatus==kIOReturnSuccess)++self->_owlyPeerCacheReported;
+                else ++self->_owlyPeerCacheDropped;
+                self->setProperty("OwlyNativePeerCacheNoted",self->_owlyPeerCacheNoted,64);
+                self->setProperty("OwlyNativePeerCacheReported",self->_owlyPeerCacheReported,64);
+                self->setProperty("OwlyNativePeerCacheDropped",self->_owlyPeerCacheDropped,64);
+            }
             for(;;) {
                 /* Deliver owed unicast-MI TX statuses (event 0x45, acked). The
                  * payload is zeroed: byte 6 == 0 means "acked" to Legacy4C. */
@@ -497,7 +547,10 @@ void RTLAirLinkFront::owlyNativeTick(thread_call_param_t context,thread_call_par
         }
         self->owlyNativeRelease(vif,peer);
     }
-    self->owlyNativeSchedule(next);
+    IOLockLock(self->_owlyVifLock);
+    const bool urgent=self->_owlyPeerCacheCount!=0 || self->_owlyUmiCount!=0;
+    IOLockUnlock(self->_owlyVifLock);
+    self->owlyNativeSchedule(urgent ? 0 : next,urgent);
     IOLockLock(self->_owlyVifLock);self->_owlyNativeCallbackThread=nullptr;IOLockUnlock(self->_owlyVifLock);
     self->release(); /* reference owned by this scheduled invocation */
 }
