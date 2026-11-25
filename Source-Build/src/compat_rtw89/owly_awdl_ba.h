@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 #define OWLY_BA_WINDOW 64u
-#define OWLY_BA_HOLE_US 32000ull
+#define OWLY_BA_HOLE_US 10000ull
 struct owly_ba_request {uint8_t action,token,tid;uint16_t status,capability,timeout,ssn,window;bool immediate,initiator;};
 static inline uint16_t owly_ba_le16(const uint8_t *p){return (uint16_t)(p[0]|(uint16_t)p[1]<<8);}
 static inline void owly_ba_put16(uint8_t *p,uint16_t n){p[0]=(uint8_t)n;p[1]=(uint8_t)(n>>8);}
@@ -103,11 +103,13 @@ static inline void owly_ba_bar(struct owly_ba_ring *s,uint16_t ssn,owly_ba_emit 
 }
 static inline void owly_ba_timeout(struct owly_ba_ring *s,uint64_t now,owly_ba_emit emit,void *ctx)
 {
- if(!s->active || !s->stored)return;
- bool found=false;
- for(unsigned i=0;i<s->size;i++)if(s->slots[i] && now>=s->arrived[i] && now-s->arrived[i]>=OWLY_BA_HOLE_US){found=true;break;}
- if(!found)return;
- while(s->stored && !s->slots[s->index])owly_ba_advance(s,emit,ctx);
- owly_ba_release(s,emit,ctx);
+ if(!s->active)return;
+ while(s->stored){
+  bool found=false;
+  for(unsigned i=0;i<s->size;i++)if(s->slots[i] && now>=s->arrived[i] && now-s->arrived[i]>=OWLY_BA_HOLE_US){found=true;break;}
+  if(!found)break;
+  while(s->stored && !s->slots[s->index])owly_ba_advance(s,emit,ctx);
+  owly_ba_release(s,emit,ctx);
+ }
 }
 #endif

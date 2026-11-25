@@ -47,11 +47,13 @@ static bool owly_peer_fault,owly_peer_accepting;
 static bool owly_peer_use_action_rssi = true;
 static bool owly_peer_turbo = true;
 static struct work_struct owly_peer_delivery_work;
+static struct delayed_work owly_peer_reorder_work;
 #define OWLY_PEER_READY_SIZE 1024u
 static struct {struct sk_buff *skb;uint64_t generation;} owly_peer_ready[OWLY_PEER_READY_SIZE];
 static unsigned owly_peer_ready_head,owly_peer_ready_count;
 static uint64_t owly_peer_ready_drops;
 static void owly_peer_delivery_run(struct work_struct *work);
+static void owly_peer_reorder_run(struct work_struct *work);
 static void owly_awdl_deliver_rx(struct sk_buff *skb);
 static struct ieee80211_channel *owly_sync_bound_channel(void);
 static int owly_sync_submit(struct ieee80211_channel *ch,const uint8_t *p,size_t n,bool data);
@@ -62,6 +64,7 @@ static void owly_peer_init(void)
  owly_peer_fault=owly_peer_accepting=false;owly_control_sequence=0;owly_tx_ba_dialog=0;
  owly_peer_ready_head=owly_peer_ready_count=0;owly_peer_ready_drops=0;
  INIT_WORK(&owly_peer_delivery_work,owly_peer_delivery_run);
+ INIT_DELAYED_WORK(&owly_peer_reorder_work,owly_peer_reorder_run);
 }
 struct owly_peer_packet_queues {
  struct list_head drop;
@@ -139,9 +142,29 @@ static void owly_peer_clear_delivery(void)
  while(owly_peer_ready_count){owly_peer_bad(&q,owly_peer_ready[owly_peer_ready_head].skb);owly_peer_ready_head=(owly_peer_ready_head+1u)%OWLY_PEER_READY_SIZE;--owly_peer_ready_count;}
  spin_unlock(&owly_peer_lock);owly_peer_queues_finish(&q);
 }
+static void owly_peer_reorder_run(struct work_struct *work)
+{
+ (void)work;
+ if(!glue.up || !glue.awdl_rx_wq)return;
+ struct owly_peer_packet_queues q;owly_peer_queues_init(&q);
+ const uint64_t now=glue_now_us();bool still_stored=false;
+ spin_lock(&owly_peer_lock);
+ if(owly_peer_accepting){
+  for(unsigned i=0;i<OWLY_RADIO_PEERS;i++)
+   for(unsigned t=0;t<16;t++)
+    if(owly_radio_peers[i].ba_map&(1u<<t)){
+     owly_ba_timeout(&owly_radio_peers[i].reorder[t],now,owly_peer_good,&q);
+     if(owly_radio_peers[i].reorder[t].stored)still_stored=true;
+    }
+ }
+ spin_unlock(&owly_peer_lock);
+ owly_peer_queues_finish(&q);
+ if(still_stored && glue.up && glue.awdl_rx_wq)
+  queue_delayed_work(glue.awdl_rx_wq,&owly_peer_reorder_work,usecs_to_jiffies(4000u));
+}
 static void owly_peer_drain_rx(void)
 { /* Only after up=false, outside command/wiphy locks. */
- owly_peer_clear_delivery();cancel_work_sync(&owly_peer_delivery_work);
+ owly_peer_clear_delivery();cancel_delayed_work_sync(&owly_peer_reorder_work);cancel_work_sync(&owly_peer_delivery_work);
 }
 static void owly_peer_fini(void){spin_lock_destroy(&owly_peer_lock);}
 static struct owly_awdl_radio_peer *owly_peer_find(const uint8_t mac[6])
@@ -520,14 +543,18 @@ static bool owly_peer_data_rx(struct sk_buff *skb)
  if(n<26 || raw[0]!=0x88 || (raw[1]&0x47) || (raw[4]&1u) || (owly_ba_le16(raw+22)&15u))return false;
  if((raw[24]&IEEE80211_QOS_CTL_ACK_POLICY_MASK)==IEEE80211_QOS_CTL_ACK_POLICY_NOACK)return false;
  static const uint8_t b[6]={0,0x25,0,0xff,0x94,0x73};if(memcmp(raw+16,b,6))return false;
- struct owly_peer_packet_queues q;owly_peer_queues_init(&q);bool consumed=false;spin_lock(&owly_peer_lock);
+ struct owly_peer_packet_queues q;owly_peer_queues_init(&q);bool consumed=false,arm_reorder=false;spin_lock(&owly_peer_lock);
  struct owly_awdl_radio_peer *p=owly_peer_find(raw+10);const unsigned tid=raw[24]&15u;
  if(p && !memcmp(raw+4,p->own,6) && (p->ba_map&(1u<<tid))){
   const uint64_t now=glue_now_us();
   owly_ba_push(&p->reorder[tid],owly_ba_le16(raw+22)>>4,skb,now,owly_peer_good,owly_peer_bad,&q);
   owly_ba_timeout(&p->reorder[tid],now,owly_peer_good,&q);
+  arm_reorder=p->reorder[tid].stored!=0;
   consumed=true;}
- spin_unlock(&owly_peer_lock);owly_peer_queues_finish(&q);return consumed;
+ spin_unlock(&owly_peer_lock);owly_peer_queues_finish(&q);
+ if(arm_reorder && glue.up && glue.awdl_rx_wq)
+  queue_delayed_work(glue.awdl_rx_wq,&owly_peer_reorder_work,usecs_to_jiffies(4000u));
+ return consumed;
 }
 static bool owly_peer_bar_rx(struct sk_buff *skb)
 {

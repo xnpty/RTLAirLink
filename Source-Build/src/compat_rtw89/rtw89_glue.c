@@ -2293,11 +2293,14 @@ static void owly_scc_filter_set(bool should_enable, unsigned int freq)
     struct rtw89_m80211_local *local = hw_to_local(hw);
     unsigned int want = FIF_OTHER_BSS | FIF_ALLMULTI | FIF_BCN_PRBRESP_PROMISC;
 #if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    static unsigned int owly_scc_filter_freq;
     struct rtw89_dev *rtwdev = hw->priv;
     const bool ax = rtwdev->chip->chip_id == RTL8852B;
     const bool awdl_channel = ax && should_enable &&
         (freq == 2437 || freq == 5220 || freq == 5745);
+    const unsigned int want_freq = awdl_channel ? freq : 0u;
     const bool mode_changed = rtwdev->hal.owly_awdl_scc_rx != awdl_channel;
+    const bool freq_changed = owly_scc_filter_freq != want_freq;
 
     /* Apply the AWDL filter to each supported social channel. Normal station
      * admission is restored whenever the real AWDL auxiliary VIF is stopped. */
@@ -2305,17 +2308,21 @@ static void owly_scc_filter_set(bool should_enable, unsigned int freq)
         want |= FIF_PROBE_REQ;
 #else
     const bool mode_changed = false;
+    const bool freq_changed = false;
     (void)freq;
 #endif
-    if (owly_scc_filter_reported == should_enable && !mode_changed) return;
+    if (owly_scc_filter_reported == should_enable && !mode_changed && !freq_changed) return;
     lockdep_assert_wiphy(hw->wiphy);
 #if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
     rtwdev->hal.owly_awdl_scc_rx = awdl_channel;
+    owly_scc_filter_freq = want_freq;
 #endif
     unsigned int flags = should_enable ? want : 0u;
     local->ops->configure_filter(hw, want, &flags, 0);
     owly_scc_filter_reported = (flags & want) == want;
 #if defined(RTW89_MACOS) && defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
+    if (mode_changed || freq_changed)
+        rtw89_btc_ntfy_awdl_chan(rtwdev);
     if (ax) {
         const u32 rx_fltr = rtw89_read32(rtwdev, R_AX_RX_FLTR_OPT);
         IOLog("OWLY SCC AX RX filter: requested=%u sniffer=%u uid=%u raw=0x%08x a1=%u uc_cam_drop=%u\n",
@@ -3541,7 +3548,7 @@ static int owly_sync_write_frame(struct ieee80211_channel *ch,const uint8_t *p,s
     if(is_qos && ampdu && unicast) info->flags|=IEEE80211_TX_CTL_AMPDU;
     info->control.vif=owly_core04c_vif;
     info->control.rates[0].idx=(s8)rate;
-    info->control.rates[0].count=unicast ? 3 : 1;
+    info->control.rates[0].count=unicast ? 12 : 1;
     info->band=ch->band;
     const unsigned int ac=data ? IEEE80211_AC_BE : IEEE80211_AC_VO;
     info->hw_queue=owly_core04c_vif->hw_queue[ac];

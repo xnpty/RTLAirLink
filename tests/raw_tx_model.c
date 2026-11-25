@@ -189,6 +189,7 @@ static void test_awdl_rate_policy(struct ieee80211_channel *ch)
  const u32 word=rtw89_build_txwd_info0(&last_desc);
  CHECK(!FIELD_GET(RTW89_TXWD_INFO0_USE_RATE,word));
  CHECK(!FIELD_GET(RTW89_TXWD_INFO0_DISDATAFB,word));
+ CHECK(last_desc.hw_rts_en && last_desc.rts_en && last_desc.tx_cnt_lmt_en && last_desc.tx_cnt_lmt==12);
  CHECK(last_desc.data_retry_lowest_rate==RTW89_HW_RATE_OFDM6);
  CHECK(hooks==0 && !last_desc.agg_en && last_desc.mac_id==rate_link.mac_id);
  CHECK(!last_desc.hw_seq_mode && !last_desc.hw_ssn_sel);
@@ -256,7 +257,7 @@ int main(void)
  struct sk_buff s=frame(8,injected|IEEE80211_TX_CTL_REQ_TX_STATUS);u8 original[108];memcpy(original,s.bytes,108);
  CHECK(owly_sync_submit(&ch,s.bytes,108,true)==0);
  CHECK(last_priority==0);CHECK(last_mapping==IEEE80211_AC_BE);CHECK(last_hw_queue==42);
- CHECK(last_desc.report);CHECK(last_desc.tx_cnt_lmt_en && last_desc.tx_cnt_lmt==3);
+ CHECK(last_desc.report);CHECK(last_desc.tx_cnt_lmt_en && last_desc.tx_cnt_lmt==12);
  CHECK(sent_len==108 && !memcmp(sent,original,108));CHECK(hooks==0);CHECK(!last_desc.agg_en);
  s=frame(0xd0,injected);memcpy(original,s.bytes,108);
  CHECK(owly_sync_submit(&ch,s.bytes,108,false)==0);

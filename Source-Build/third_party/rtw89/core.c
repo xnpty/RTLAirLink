@@ -1352,9 +1352,15 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 	    peer->ra.macid == desc_info->mac_id && peer->ra.ra_mask &&
 	    peer->ra.bw_cap <= chan->band_width) {
 		/* Let firmware choose the data rate using the AWDL peer's
-		 * negotiated HT/VHT rate table. Keep the raw frame and sequence. */
+		 * negotiated HT/VHT rate table. Keep the raw frame and sequence.
+		 * Protect all unicast peer data (including TCP SYN/TLS before
+		 * TX BlockAck is operational) with HW RTS/CTS and 12 retries. */
 		desc_info->use_rate = false;
 		desc_info->dis_data_fb = false;
+		desc_info->hw_rts_en = true;
+		desc_info->rts_en = true;
+		desc_info->tx_cnt_lmt_en = true;
+		desc_info->tx_cnt_lmt = 12;
 		if (is_qos && (info->flags & IEEE80211_TX_CTL_AMPDU) &&
 		    test_bit(0, peer->rtwsta->ampdu_map)) {
 			const struct ieee80211_link_sta *lsta = &tx_req->sta->deflink;
@@ -1366,10 +1372,6 @@ static void rtw89_core_tx_update_awdl_port(struct rtw89_dev *rtwdev,
 			desc_info->agg_en = true;
 			desc_info->ampdu_num = (u8)(agg_num - 1u);
 			desc_info->ampdu_density = lsta->ht_cap.ampdu_density;
-			desc_info->hw_rts_en = true;
-			desc_info->rts_en = true;
-			desc_info->tx_cnt_lmt_en = true;
-			desc_info->tx_cnt_lmt = 12;
 		}
 	}
 }
