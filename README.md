@@ -31,18 +31,18 @@ RTLAirLink carries the same Realtek `rtw89` PCIe chip tables and firmware set as
 ### One-command Terminal install (recommended)
 
 ~~~bash
-curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash
+curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-rtlairlink.sh | bash
 ~~~
 
 To also install or replace the bundled Realtek USB Bluetooth kexts (`BlueToolFixup.kext` + `RealtekBluetoothFirmware.kext` + `-btlfxallowanyaddr` + Bluetooth NVRAM keys):
 
 ~~~bash
-curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash -s -- --with-bluetooth
+curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-rtlairlink.sh | bash -s -- --with-bluetooth
 ~~~
 
 ### Offline / GUI install
 
-1. Download and extract [RTLAirLink-v0.4.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/RTLAirLink-v0.4.0-x86_64.zip).
+1. Download and extract [RTLAirLink-v0.4.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/RTLAirLink-v0.4.0-x86_64.zip).
 2. Open `Install-RTLAirLink.command`. Check the EFI target and preview, then enter `y` to back up and install.
 3. Restart macOS.
 
@@ -65,7 +65,7 @@ curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-
 
 ## Troubleshooting
 
-- **Preview without writing:** `curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash -s -- --efi /Volumes/EFI --dry-run`
+- **Preview without writing:** `curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-rtlairlink.sh | bash -s -- --efi /Volumes/EFI --dry-run`
 - **Verify loaded kexts after reboot:**
   ~~~bash
   kmutil showloaded --list-only | grep -Ei 'Lilu|IOSkywalkFamily|IO80211FamilyLegacy|AMFIPass|io\.github\.xnpty\.RTLAirLink|BlueToolFixup|RealtekBluetoothFirmware'

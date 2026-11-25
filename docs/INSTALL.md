@@ -5,18 +5,18 @@ Use this release on x86_64 macOS Tahoe 26 with an existing OpenCore EFI. Hardwar
 ## Option 1: One-command Terminal install (recommended)
 
 ~~~bash
-curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash
+curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-rtlairlink.sh | bash
 ~~~
 
 With bundled Realtek USB Bluetooth kexts (`BlueToolFixup.kext` + `RealtekBluetoothFirmware.kext`):
 
 ~~~bash
-curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash -s -- --with-bluetooth
+curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-rtlairlink.sh | bash -s -- --with-bluetooth
 ~~~
 
 ## Option 2: Download ZIP and run locally (works offline)
 
-1. Download and extract [RTLAirLink-v0.4.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/RTLAirLink-v0.4.0-x86_64.zip).
+1. Download and extract [RTLAirLink-v0.4.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/RTLAirLink-v0.4.0-x86_64.zip).
 2. Double-click `Install-RTLAirLink.command` (or run `bash Install-RTLAirLink.command` in Terminal).
 3. Review the preview (target EFI, kexts to install/replace, load order, and boot-args), enter `y` to back up and apply, and optionally enter `y` to install the `rtlairlink-rtgd` background service for smooth iPhone Mirroring.
 4. Restart macOS.
@@ -52,7 +52,7 @@ By default, the installer **replaces** any differing or older copies of these ke
 Example dry run:
 
 ~~~bash
-curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash -s -- --efi /Volumes/EFI --dry-run
+curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-rtlairlink.sh | bash -s -- --efi /Volumes/EFI --dry-run
 ~~~
 
 ## Exact OpenCore Load Order and Settings

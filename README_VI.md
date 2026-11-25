@@ -31,18 +31,18 @@ RTLAirLink tích hợp bảng PCI ID và firmware `rtw89` tương tự `AirPort_
 ### Cài nhanh bằng 1 lệnh Terminal (khuyên dùng)
 
 ~~~bash
-curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash
+curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-rtlairlink.sh | bash
 ~~~
 
 Nếu muốn cài hoặc thay luôn bộ kext Bluetooth Realtek USB (`BlueToolFixup.kext` + `RealtekBluetoothFirmware.kext` + `-btlfxallowanyaddr` + NVRAM Bluetooth):
 
 ~~~bash
-curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash -s -- --with-bluetooth
+curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-rtlairlink.sh | bash -s -- --with-bluetooth
 ~~~
 
 ### Cài offline / bằng file ZIP
 
-1. Tải và giải nén [RTLAirLink-v0.4.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/RTLAirLink-v0.4.0-x86_64.zip).
+1. Tải và giải nén [RTLAirLink-v0.4.0-x86_64.zip](https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/RTLAirLink-v0.4.0-x86_64.zip).
 2. Mở `Install-RTLAirLink.command`, kiểm tra đúng EFI trong bản xem trước rồi gõ `y` để sao lưu và cài.
 3. Khởi động lại macOS.
 
@@ -67,7 +67,7 @@ curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-
 
 - **Chạy thử xem trước (không ghi EFI):**
   ~~~bash
-  curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/v0.4.0/install-rtlairlink.sh | bash -s -- --efi /Volumes/EFI --dry-run
+  curl -fsSL https://github.com/xnpty/RTLAirLink/releases/download/0.4.0/install-rtlairlink.sh | bash -s -- --efi /Volumes/EFI --dry-run
   ~~~
 - **Kiểm tra kext đã nạp sau khi khởi động lại:**
   ~~~bash
